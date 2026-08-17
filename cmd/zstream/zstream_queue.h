@@ -1,16 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * This file and its contents are supplied under the terms of the Common
- * Development and Distribution License ("CDDL"), version 1.0. You may only use
- * this file in accordance with the terms of version 1.0 of the CDDL.
- *
- * A full copy of the text of the CDDL should have accompanied this source. A
- * copy of the CDDL is also available via the Internet at
- * http://www.illumos.org/license/CDDL.
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -55,14 +52,18 @@ extern "C" {
  * threads never block waiting for additional work to arrive. They start
  * work as quickly as possible even if the budget has not been reached.
  *
+ * A batch budget of 0 means that all batches will have a size of 1.
+ *
  * All queues share a single thread pool that is managed to avoid
  * contention. Threads are assigned to queues dynamically according to
  * where work is available. When multiple queues have work, threads are
  * allocated among them stochastically with an eye toward preventing
  * pipeline stalls.
+ *
+ * The shared thread pool persists until the process exits.
  */
 
-#define	MAX_BATCH 16	/* The most items that can be claimed at once */
+#define	MAX_BATCH 32	/* The most items that can be claimed at once */
 
 typedef void queue_item_t;
 

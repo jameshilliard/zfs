@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -448,7 +438,10 @@ vdev_initialize_calculate_progress(vdev_t *vd)
 		 * metaslab. Load it and walk the free tree for more accurate
 		 * progress estimation.
 		 */
-		VERIFY0(metaslab_load(msp));
+		if (metaslab_load(msp) != 0) {
+			mutex_exit(&msp->ms_lock);
+			continue;
+		}
 
 		zfs_btree_index_t where;
 		zfs_range_tree_t *rt = msp->ms_allocatable;
@@ -574,7 +567,16 @@ vdev_initialize_thread(void *arg)
 		mutex_enter(&msp->ms_lock);
 		if (!msp->ms_loaded && !msp->ms_loading)
 			unload_when_done = B_TRUE;
-		VERIFY0(metaslab_load(msp));
+		error = metaslab_load(msp);
+		if (error != 0) {
+			mutex_exit(&msp->ms_lock);
+			metaslab_enable(msp, B_FALSE, unload_when_done);
+			spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+			zfs_dbgmsg("initialize: unable to load metaslab %llu "
+			    "on vdev %s: error %d",
+			    (u_longlong_t)msp->ms_id, vd->vdev_path, error);
+			break;
+		}
 
 		zfs_range_tree_walk(msp->ms_allocatable,
 		    vdev_initialize_range_add, vd);
@@ -603,7 +605,10 @@ vdev_initialize_thread(void *arg)
 
 	mutex_enter(&vd->vdev_initialize_lock);
 	if (!vd->vdev_initialize_exit_wanted) {
-		if (vdev_writeable(vd)) {
+		if (error != 0 && vdev_writeable(vd)) {
+			vdev_initialize_change_state(vd,
+			    VDEV_INITIALIZE_SUSPENDED);
+		} else if (vdev_writeable(vd)) {
 			vdev_initialize_change_state(vd,
 			    VDEV_INITIALIZE_COMPLETE);
 		} else if (vd->vdev_faulted) {

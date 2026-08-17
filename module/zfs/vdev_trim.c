@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -728,7 +718,10 @@ vdev_trim_calculate_progress(vdev_t *vd)
 		 * metaslab.  Load it and walk the free tree for more
 		 * accurate progress estimation.
 		 */
-		VERIFY0(metaslab_load(msp));
+		if (metaslab_load(msp) != 0) {
+			mutex_exit(&msp->ms_lock);
+			continue;
+		}
 
 		zfs_range_tree_t *rt = msp->ms_allocatable;
 		zfs_btree_t *bt = &rt->rt_root;
@@ -857,10 +850,11 @@ vdev_trim_range_add(void *arg, uint64_t start, uint64_t size)
 	 */
 	if (zfs_flags & ZFS_DEBUG_TRIM) {
 		metaslab_t *msp = ta->trim_msp;
-		VERIFY0(metaslab_load(msp));
+		if (metaslab_load(msp) != 0)
+			return;
 		VERIFY3B(msp->ms_loaded, ==, B_TRUE);
-		VERIFY(zfs_range_tree_contains(msp->ms_allocatable, start,
-		    size));
+		VERIFY(zfs_range_tree_contains(msp->ms_allocatable,
+		    start, size));
 	}
 
 	ASSERT(vd->vdev_ops->vdev_op_leaf);
@@ -935,7 +929,16 @@ vdev_trim_thread(void *arg)
 		spa_config_exit(spa, SCL_CONFIG, FTAG);
 		metaslab_disable(msp);
 		mutex_enter(&msp->ms_lock);
-		VERIFY0(metaslab_load(msp));
+		error = metaslab_load(msp);
+		if (error != 0) {
+			mutex_exit(&msp->ms_lock);
+			metaslab_enable(msp, B_FALSE, B_FALSE);
+			spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+			zfs_dbgmsg("trim: unable to load metaslab %llu on "
+			    "vdev %s: error %d",
+			    (u_longlong_t)msp->ms_id, vd->vdev_path, error);
+			break;
+		}
 
 		/*
 		 * If a partial TRIM was requested skip metaslabs which have
@@ -970,7 +973,11 @@ vdev_trim_thread(void *arg)
 
 	mutex_enter(&vd->vdev_trim_lock);
 	if (!vd->vdev_trim_exit_wanted) {
-		if (vdev_writeable(vd)) {
+		if (error != 0 && vdev_writeable(vd)) {
+			vdev_trim_change_state(vd, VDEV_TRIM_SUSPENDED,
+			    vd->vdev_trim_rate, vd->vdev_trim_partial,
+			    vd->vdev_trim_secure);
+		} else if (vdev_writeable(vd)) {
 			vdev_trim_change_state(vd, VDEV_TRIM_COMPLETE,
 			    vd->vdev_trim_rate, vd->vdev_trim_partial,
 			    vd->vdev_trim_secure);
@@ -1280,7 +1287,8 @@ vdev_autotrim_thread(void *arg)
 			 * Skip the metaslab when it has never been allocated
 			 * or when there are no recent frees to trim.
 			 */
-			if (msp->ms_sm == NULL ||
+			if (msp->ms_load_state == METASLAB_LOAD_UNLOADABLE ||
+			    msp->ms_sm == NULL ||
 			    zfs_range_tree_is_empty(msp->ms_trim)) {
 				mutex_exit(&msp->ms_lock);
 				metaslab_enable(msp, B_FALSE, B_FALSE);
@@ -1413,10 +1421,11 @@ vdev_autotrim_thread(void *arg)
 			 */
 			if (zfs_flags & ZFS_DEBUG_TRIM) {
 				mutex_enter(&msp->ms_lock);
-				VERIFY0(metaslab_load(msp));
-				VERIFY3P(tap[0].trim_msp, ==, msp);
-				zfs_range_tree_walk(trim_tree,
-				    vdev_trim_range_verify, &tap[0]);
+				if (metaslab_load(msp) == 0) {
+					VERIFY3P(tap[0].trim_msp, ==, msp);
+					zfs_range_tree_walk(trim_tree,
+					    vdev_trim_range_verify, &tap[0]);
+				}
 				mutex_exit(&msp->ms_lock);
 			}
 

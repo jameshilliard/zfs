@@ -456,6 +456,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/acl/posix/posix_002_pos.ksh \
 	functional/acl/posix/posix_003_pos.ksh \
 	functional/acl/posix/posix_004_pos.ksh \
+	functional/acl/posix/posix_005_pos.ksh \
 	functional/acl/posix-sa/cleanup.ksh \
 	functional/acl/posix-sa/posix_001_pos.ksh \
 	functional/acl/posix-sa/posix_002_pos.ksh \
@@ -1083,6 +1084,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/cli_root/zhack/zhack_label_repair_003.ksh \
 	functional/cli_root/zhack/zhack_label_repair_004.ksh \
 	functional/cli_root/zhack/zhack_metaslab_leak.ksh \
+	functional/cli_root/zhack/zhack_metaslab_repair.ksh \
 	functional/cli_root/zpool_add/add_nested_replacing_spare.ksh \
 	functional/cli_root/zpool_add/add-o_ashift.ksh \
 	functional/cli_root/zpool_add/add_prop_ashift.ksh \
@@ -1385,6 +1387,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/cli_root/zpool_status/zpool_status_006_pos.ksh \
 	functional/cli_root/zpool_status/zpool_status_007_pos.ksh \
 	functional/cli_root/zpool_status/zpool_status_008_pos.ksh \
+	functional/cli_root/zpool_status/zpool_status_009_pos.ksh \
 	functional/cli_root/zpool_status/zpool_status_features_001_pos.ksh \
 	functional/cli_root/zpool_sync/cleanup.ksh \
 	functional/cli_root/zpool_sync/setup.ksh \
@@ -1816,6 +1819,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/mmp/cleanup.ksh \
 	functional/mmp/mmp_active_import.ksh \
 	functional/mmp/mmp_concurrent_import.ksh \
+	functional/mmp/mmp_degraded_import.ksh \
 	functional/mmp/mmp_exported_import.ksh \
 	functional/mmp/mmp_hostid.ksh \
 	functional/mmp/mmp_inactive_import.ksh \
@@ -1828,6 +1832,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/mmp/mmp_write_distribution.ksh \
 	functional/mmp/mmp_write_slow_disk.ksh \
 	functional/mmp/mmp_write_uberblocks.ksh \
+	functional/mmp/mmp_zhack_reclaim.ksh \
 	functional/mmp/multihost_history.ksh \
 	functional/mmp/setup.ksh \
 	functional/mount/cleanup.ksh \
@@ -2183,7 +2188,9 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/rsend/send_raw_ashift.ksh \
 	functional/rsend/send_raw_spill_block.ksh \
 	functional/rsend/send_raw_large_blocks.ksh \
+	functional/rsend/send_realloc_dnode_mixed.ksh \
 	functional/rsend/send_realloc_dnode_nblkptr.ksh \
+	functional/rsend/send_realloc_dnode_resume.ksh \
 	functional/rsend/send_realloc_dnode_size.ksh \
 	functional/rsend/send_realloc_encrypted_files.ksh \
 	functional/rsend/send_realloc_files.ksh \
@@ -2239,8 +2246,15 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/snapdir/snapdir_admin_create_destroy.ksh \
 	functional/snapdir/snapdir_admin_disabled.ksh \
 	functional/snapdir/snapdir_admin_rename_destroy.ksh \
+	functional/snapdir/snapdir_mount_bind.ksh \
+	functional/snapdir/snapdir_mount_expire_bind.ksh \
 	functional/snapdir/snapdir_mount_expire_busy.ksh \
 	functional/snapdir/snapdir_mount_expire_idle.ksh \
+	functional/snapdir/snapdir_mount_expire_move.ksh \
+	functional/snapdir/snapdir_mount_fd_hold.ksh \
+	functional/snapdir/snapdir_mount_foreign.ksh \
+	functional/snapdir/snapdir_mount_move.ksh \
+	functional/snapdir/snapdir_mount_multiple.ksh \
 	functional/snapdir/snapdir_mount_no_setuid.ksh \
 	functional/snapdir/snapdir_mount_parallel.ksh \
 	functional/snapdir/snapdir_mount_unmount.ksh \
@@ -2442,6 +2456,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/zstream/zstream_dump_002_pos.ksh \
 	functional/zstream/zstream_dump_003_pos.ksh \
 	functional/zstream/zstream_dump_004_neg.ksh \
+	functional/zstream/zstream_raw_001_pos.ksh \
 	functional/zstream/zstream_recompress_001_pos.ksh \
 	functional/zstream/zstream_recompress_002_pos.ksh \
 	functional/zstream/zstream_recompress_003_pos.ksh \
@@ -2449,6 +2464,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/zstream/zstream_recompress_005_pos.ksh \
 	functional/zstream/zstream_redup_001_pos.ksh \
 	functional/zstream/zstream_validate_001_neg.ksh \
+	functional/zstream/zstream_selftest_queue_001_pos.ksh \
 	functional/zvol/zvol_cli/cleanup.ksh \
 	functional/zvol/zvol_cli/setup.ksh \
 	functional/zvol/zvol_cli/zvol_cli_001_pos.ksh \

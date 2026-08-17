@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -5009,7 +4999,7 @@ spa_raidz_expand_thread(void *arg, zthr_t *zthr)
 			continue;
 		}
 
-		VERIFY0(metaslab_load(msp));
+		boolean_t loaded = (metaslab_load(msp) == 0);
 
 		/*
 		 * We want to copy everything except the free (allocatable)
@@ -5024,8 +5014,10 @@ spa_raidz_expand_thread(void *arg, zthr_t *zthr)
 		    metaslab_rt_name(msp->ms_group, msp,
 		    "spa_raidz_expand_thread:rt"));
 		zfs_range_tree_add(rt, msp->ms_start, msp->ms_size);
-		zfs_range_tree_walk(msp->ms_allocatable, zfs_range_tree_remove,
-		    rt);
+		if (loaded) {
+			zfs_range_tree_walk(msp->ms_allocatable,
+			    zfs_range_tree_remove, rt);
+		}
 		mutex_exit(&msp->ms_lock);
 
 		/*
@@ -5248,7 +5240,6 @@ vdev_raidz_attach_sync(void *arg, dmu_tx_t *tx)
 	vdrz->vn_vre.vre_offset = 0;
 	vdrz->vn_vre.vre_failed_offset = UINT64_MAX;
 	spa->spa_raidz_expand = &vdrz->vn_vre;
-	zthr_wakeup(spa->spa_raidz_expand_zthr);
 
 	/*
 	 * Dirty the config so that ZPOOL_CONFIG_RAIDZ_EXPANDING will get

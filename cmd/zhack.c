@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -37,6 +27,7 @@
 #include <ctype.h>
 #include <sys/stat.h>
 #include <sys/zfs_context.h>
+#include <sys/zfs_debug.h>
 #include <sys/spa.h>
 #include <sys/spa_impl.h>
 #include <sys/dmu.h>
@@ -45,6 +36,7 @@
 #include <sys/dsl_synctask.h>
 #include <sys/vdev.h>
 #include <sys/vdev_impl.h>
+#include <sys/mmp.h>
 #include <sys/fs/zfs.h>
 #include <sys/dmu_objset.h>
 #include <sys/dsl_pool.h>
@@ -111,8 +103,19 @@ usage(void)
 	    "\n"
 	    "    <device> : path to vdev\n"
 	    "\n"
+	    "    mmp reclaim <pool>\n"
+	    "        import a pool whose MMP claim cannot reach every mirror\n"
+	    "        leg the config still expects, then mark the unreachable\n"
+	    "        leaves offline so ordinary imports succeed.  Manual\n"
+	    "        recovery: fence the peer first, this cannot see a\n"
+	    "        live host whose legs are all invisible from here\n"
+	    "\n"
 	    "    metaslab leak <pool>\n"
-	    "        apply allocation map from zdb to specified pool\n");
+	    "        apply allocation map from zdb to specified pool\n"
+	    "    metaslab corrupt <pool> <type>\n"
+	    "        inject duplicate-free, partial-free, duplicate-alloc,\n"
+	    "        partial-alloc, chained, invalid-summary, or\n"
+	    "        invalid-entry damage\n");
 	exit(1);
 }
 
@@ -601,6 +604,174 @@ zhack_do_action_idle(int argc, char **argv)
 	spa_close(spa, FTAG);
 }
 
+/*
+ * Collect the mirror legs this host could not open.  vdev_not_present is set
+ * during import for any leaf whose open failed (vdev.c), and a leg in that
+ * state is what the relaxed claim forgives, so it is also what has to be
+ * marked offline for the ordinary imports which follow to succeed.
+ */
+static void
+zhack_collect_absent(vdev_t *vd, uint64_t *guids, uint_t *n, uint_t max)
+{
+	/*
+	 * Skip the same subtrees mmp_claim_uberblock_sync() skips.  The claim
+	 * never counts these, so offlining them buys nothing, and offlining a
+	 * log leg would drag in spa_reset_logs().  Pruned at the interior node
+	 * because the log flag lives on the top-level vdev.
+	 */
+	if (vd->vdev_islog || vd->vdev_isspare || vd->vdev_isl2cache ||
+	    vd->vdev_ishole || vd->vdev_ops == &vdev_indirect_ops)
+		return;
+
+	for (uint64_t c = 0; c < vd->vdev_children; c++)
+		zhack_collect_absent(vd->vdev_child[c], guids, n, max);
+
+	if (!vd->vdev_ops->vdev_op_leaf || !vd->vdev_not_present)
+		return;
+
+	/*
+	 * Take only the legs the relaxed claim can forgive, which are the
+	 * direct children of a top-level mirror: the relaxation lives in the
+	 * nparity == 0 branch and walks that vdev's children.  A raidz or
+	 * draid member is required as parity+1 in aggregate and never demanded
+	 * individually, so an absent one does not raise the requirement and
+	 * offlining it would be a persistent change that buys nothing.
+	 */
+	if (vd->vdev_parent != vd->vdev_top ||
+	    vdev_get_nparity(vd->vdev_top) != 0)
+		return;
+
+	VERIFY3U(*n, <, max);
+	guids[(*n)++] = vd->vdev_guid;
+}
+
+static int
+zhack_do_mmp_reclaim(int argc, char **argv)
+{
+	spa_t *spa;
+	char *target;
+	uint64_t *guids;
+	uint_t nguids = 0, max;
+	int c, failed = 0;
+
+	optind = 1;
+	while ((c = getopt(argc, argv, "+")) != -1) {
+		switch (c) {
+		default:
+			usage();
+			break;
+		}
+	}
+	argc -= optind;
+	argv += optind;
+
+	if (argc < 1) {
+		(void) fprintf(stderr, "error: missing pool name\n");
+		usage();
+	}
+	target = argv[0];
+
+	/*
+	 * Relax the claim for this import only.  The write, the wait and the
+	 * re-read are untouched, so a competing importer which shares any
+	 * visibility with us is still refused.
+	 */
+	mmp_claim_relaxed = B_TRUE;
+	zhack_spa_open(target, B_FALSE, FTAG, &spa);
+	mmp_claim_relaxed = B_FALSE;
+
+	/*
+	 * Nothing to recover on a pool without multihost: no claim runs, so an
+	 * ordinary import already succeeds with the absent leaves simply
+	 * missing.  Offlining them here would be a permanent change to a pool
+	 * that never needed this tool.
+	 */
+	if (!spa_multihost(spa)) {
+		(void) fprintf(stderr, "%s: multihost is off, so no uberblock "
+		    "claim runs and an ordinary import will succeed; refusing "
+		    "to offline anything\n", target);
+		spa_close(spa, FTAG);
+		return (1);
+	}
+
+	/* Takes SCL_VDEV itself, so size the array before we hold it. */
+	max = MAX(vdev_count_leaves(spa), 1);
+	guids = umem_zalloc(max * sizeof (uint64_t), UMEM_NOFAIL);
+
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	zhack_collect_absent(spa->spa_root_vdev, guids, &nguids, max);
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+
+	if (nguids == 0) {
+		(void) fprintf(stdout, "%s: imported, no absent leaves to "
+		    "mark offline\n", target);
+	}
+
+	for (uint_t i = 0; i < nguids; i++) {
+		int error = vdev_offline(spa, guids[i], 0);
+
+		if (error == 0) {
+			(void) fprintf(stdout, "%s: marked absent leaf %llu "
+			    "offline\n", target, (u_longlong_t)guids[i]);
+			continue;
+		}
+
+		failed++;
+		if (error == EBUSY) {
+			(void) fprintf(stderr, "%s: leaf %llu holds data no "
+			    "other leaf has, left online\n", target,
+			    (u_longlong_t)guids[i]);
+		} else {
+			(void) fprintf(stderr, "%s: could not offline leaf "
+			    "%llu: %s\n", target, (u_longlong_t)guids[i],
+			    strerror(error));
+		}
+	}
+
+	if (failed != 0) {
+		/*
+		 * Not "the pool still needs zhack": this run exports cleanly
+		 * under our own hostid, so the next import here skips the
+		 * activity check entirely.  The cost lands on the next host
+		 * to take the pool, whose claim will count the leaves left
+		 * online and refuse.
+		 */
+		(void) fprintf(stderr, "%s: %d absent leaves are still "
+		    "online; a later import from another host will count "
+		    "them and be refused\n", target, failed);
+	}
+
+	umem_free(guids, max * sizeof (uint64_t));
+	spa_close(spa, FTAG);
+
+	return (failed == 0 ? 0 : 1);
+}
+
+static int
+zhack_do_mmp(int argc, char **argv)
+{
+	char *subcommand;
+
+	argc--;
+	argv++;
+	if (argc == 0) {
+		(void) fprintf(stderr,
+		    "error: no mmp operation specified\n");
+		usage();
+	}
+
+	subcommand = argv[0];
+	if (strcmp(subcommand, "reclaim") == 0) {
+		return (zhack_do_mmp_reclaim(argc, argv));
+	} else {
+		(void) fprintf(stderr, "error: unknown subcommand: %s\n",
+		    subcommand);
+		usage();
+	}
+
+	return (0);
+}
+
 static int
 zhack_do_action(int argc, char **argv)
 {
@@ -785,6 +956,241 @@ zhack_do_metaslab_leak(int argc, char **argv)
 	spa_close(spa, FTAG);
 }
 
+typedef enum zhack_metaslab_corruption {
+	ZHACK_METASLAB_DUPLICATE_FREE,
+	ZHACK_METASLAB_PARTIAL_FREE,
+	ZHACK_METASLAB_DUPLICATE_ALLOC,
+	ZHACK_METASLAB_PARTIAL_ALLOC,
+	ZHACK_METASLAB_CHAINED,
+	ZHACK_METASLAB_INVALID_SUMMARY,
+	ZHACK_METASLAB_INVALID_ENTRY
+} zhack_metaslab_corruption_t;
+
+typedef struct zhack_metaslab_corrupt_arg {
+	zhack_metaslab_corruption_t zmca_type;
+	const char *zmca_name;
+	boolean_t zmca_injected;
+	uint64_t zmca_vdev;
+	uint64_t zmca_metaslab;
+	uint64_t zmca_offset;
+	uint64_t zmca_size;
+} zhack_metaslab_corrupt_arg_t;
+
+static boolean_t
+zhack_metaslab_corrupt_range(metaslab_t *msp,
+    zhack_metaslab_corruption_t type, uint64_t *offset, uint64_t *size)
+{
+	zfs_range_tree_t *rt = msp->ms_allocatable;
+	uint64_t unit = 1ULL << msp->ms_sm->sm_shift;
+	uint64_t cursor = msp->ms_start;
+	zfs_btree_index_t where;
+	zfs_range_seg_t *rs;
+
+	for (rs = zfs_btree_first(&rt->rt_root, &where); rs != NULL;
+	    rs = zfs_btree_next(&rt->rt_root, &where, &where)) {
+		uint64_t start = zfs_rs_get_start(rs, rt);
+		uint64_t end = zfs_rs_get_end(rs, rt);
+
+		if ((type == ZHACK_METASLAB_DUPLICATE_ALLOC) &&
+		    start - cursor >= unit) {
+			*offset = cursor;
+			*size = unit;
+			return (B_TRUE);
+		}
+		if (type == ZHACK_METASLAB_DUPLICATE_FREE &&
+		    end - start >= unit) {
+			*offset = start;
+			*size = unit;
+			return (B_TRUE);
+		}
+		if ((type == ZHACK_METASLAB_PARTIAL_FREE ||
+		    type == ZHACK_METASLAB_PARTIAL_ALLOC) &&
+		    start - msp->ms_start >= unit) {
+			*offset = start - unit;
+			*size = 2 * unit;
+			return (B_TRUE);
+		}
+		if (type == ZHACK_METASLAB_CHAINED && end - start >= 2 * unit) {
+			*offset = start;
+			*size = 2 * unit;
+			return (B_TRUE);
+		}
+		if ((type == ZHACK_METASLAB_PARTIAL_FREE ||
+		    type == ZHACK_METASLAB_PARTIAL_ALLOC) &&
+		    msp->ms_start + msp->ms_size - end >= unit) {
+			*offset = end - unit;
+			*size = 2 * unit;
+			return (B_TRUE);
+		}
+		cursor = end;
+	}
+
+	if (type == ZHACK_METASLAB_DUPLICATE_ALLOC &&
+	    msp->ms_start + msp->ms_size - cursor >= unit) {
+		*offset = cursor;
+		*size = unit;
+		return (B_TRUE);
+	}
+
+	return (B_FALSE);
+}
+
+static void
+zhack_metaslab_corrupt_invalid_entry(space_map_t *sm, dmu_tx_t *tx)
+{
+	uint64_t entry = SM_OFFSET_ENCODE(sm->sm_size >> sm->sm_shift) |
+	    SM_TYPE_ENCODE(SM_ALLOC) | SM_RUN_ENCODE(1);
+
+	dmu_buf_will_dirty(sm->sm_dbuf, tx);
+	dmu_write(sm->sm_os, space_map_object(sm), space_map_length(sm),
+	    sizeof (entry), &entry, tx, DMU_READ_NO_PREFETCH);
+	sm->sm_phys->smp_length += sizeof (entry);
+}
+
+static void
+zhack_metaslab_corrupt_sync(void *arg, dmu_tx_t *tx)
+{
+	zhack_metaslab_corrupt_arg_t *zmca = arg;
+	spa_t *spa = dmu_tx_pool(tx)->dp_spa;
+	vdev_t *rvd = spa->spa_root_vdev;
+
+	for (uint64_t c = 0; c < rvd->vdev_children; c++) {
+		vdev_t *vd = rvd->vdev_child[c];
+		if (vd->vdev_mg == NULL)
+			continue;
+
+		for (uint64_t m = 0; m < vd->vdev_ms_count; m++) {
+			metaslab_t *msp = vd->vdev_ms[m];
+
+			mutex_enter(&msp->ms_lock);
+			if (msp->ms_sm == NULL || metaslab_load(msp) != 0) {
+				mutex_exit(&msp->ms_lock);
+				continue;
+			}
+
+			uint64_t offset = 0;
+			uint64_t size = 0;
+			boolean_t invalid_summary = zmca->zmca_type ==
+			    ZHACK_METASLAB_INVALID_SUMMARY;
+			boolean_t invalid_entry = zmca->zmca_type ==
+			    ZHACK_METASLAB_INVALID_ENTRY;
+			if (invalid_summary) {
+				dmu_buf_will_dirty(msp->ms_sm->sm_dbuf, tx);
+				msp->ms_sm->sm_phys->smp_alloc =
+				    -(int64_t)(1ULL << msp->ms_sm->sm_shift);
+			} else if (invalid_entry) {
+				offset = msp->ms_start + msp->ms_size;
+				size = 1ULL << msp->ms_sm->sm_shift;
+			} else if (!zhack_metaslab_corrupt_range(msp,
+			    zmca->zmca_type, &offset, &size)) {
+				mutex_exit(&msp->ms_lock);
+				continue;
+			}
+
+			space_map_t *sm = msp->ms_sm;
+			zfs_range_tree_t *rt = NULL;
+			if (!invalid_summary && !invalid_entry) {
+				rt = zfs_range_tree_create(NULL,
+				    ZFS_RANGE_SEG64, NULL, 0, 0);
+				uint64_t first_size =
+				    zmca->zmca_type == ZHACK_METASLAB_CHAINED ?
+				    size / 2 : size;
+				zfs_range_tree_add(rt, offset, first_size);
+			}
+			mutex_exit(&msp->ms_lock);
+
+			if (invalid_entry) {
+				zhack_metaslab_corrupt_invalid_entry(sm, tx);
+			} else if (rt != NULL) {
+				maptype_t maptype =
+				    zmca->zmca_type ==
+				    ZHACK_METASLAB_DUPLICATE_ALLOC ||
+				    zmca->zmca_type ==
+				    ZHACK_METASLAB_PARTIAL_ALLOC ?
+				    SM_ALLOC : SM_FREE;
+				space_map_write(sm, rt, maptype,
+				    SM_NO_VDEVID, tx);
+				if (zmca->zmca_type == ZHACK_METASLAB_CHAINED) {
+					zfs_range_tree_vacate(rt, NULL, NULL);
+					zfs_range_tree_add(rt, offset, size);
+					space_map_write(sm, rt, SM_ALLOC,
+					    SM_NO_VDEVID, tx);
+				}
+				zfs_range_tree_vacate(rt, NULL, NULL);
+				zfs_range_tree_destroy(rt);
+			}
+
+			zmca->zmca_injected = B_TRUE;
+			zmca->zmca_vdev = vd->vdev_id;
+			zmca->zmca_metaslab = msp->ms_id;
+			zmca->zmca_offset = offset;
+			zmca->zmca_size = size;
+			return;
+		}
+	}
+}
+
+static void
+zhack_do_metaslab_corrupt(int argc, char **argv)
+{
+	char *target;
+	spa_t *spa;
+
+	argc--;
+	argv++;
+	if (argc != 2) {
+		(void) fprintf(stderr,
+		    "error: expected a pool name and corruption type\n");
+		usage();
+	}
+	target = argv[0];
+
+	zhack_metaslab_corrupt_arg_t zmca = {
+		.zmca_name = argv[1],
+	};
+	if (strcmp(zmca.zmca_name, "duplicate-free") == 0) {
+		zmca.zmca_type = ZHACK_METASLAB_DUPLICATE_FREE;
+	} else if (strcmp(zmca.zmca_name, "partial-free") == 0) {
+		zmca.zmca_type = ZHACK_METASLAB_PARTIAL_FREE;
+	} else if (strcmp(zmca.zmca_name, "duplicate-alloc") == 0) {
+		zmca.zmca_type = ZHACK_METASLAB_DUPLICATE_ALLOC;
+	} else if (strcmp(zmca.zmca_name, "partial-alloc") == 0) {
+		zmca.zmca_type = ZHACK_METASLAB_PARTIAL_ALLOC;
+	} else if (strcmp(zmca.zmca_name, "chained") == 0) {
+		zmca.zmca_type = ZHACK_METASLAB_CHAINED;
+	} else if (strcmp(zmca.zmca_name, "invalid-summary") == 0) {
+		zmca.zmca_type = ZHACK_METASLAB_INVALID_SUMMARY;
+	} else if (strcmp(zmca.zmca_name, "invalid-entry") == 0) {
+		zmca.zmca_type = ZHACK_METASLAB_INVALID_ENTRY;
+	} else {
+		(void) fprintf(stderr, "error: unknown corruption type: %s\n",
+		    zmca.zmca_name);
+		usage();
+	}
+
+	/*
+	 * Committing an intentionally inconsistent space map can make its
+	 * allocation summary disagree with the loaded metaslab.  Leave other
+	 * debug checks enabled while allowing the injector to close the pool.
+	 */
+	zfs_flags &= ~ZFS_DEBUG_METASLAB_VERIFY;
+	zhack_spa_open(target, B_FALSE, FTAG, &spa);
+
+	VERIFY0(dsl_sync_task(spa_name(spa), NULL,
+	    zhack_metaslab_corrupt_sync, &zmca, 5,
+	    ZFS_SPACE_CHECK_NONE));
+	if (!zmca.zmca_injected) {
+		fatal(spa, FTAG, "no suitable metaslab range available in '%s'",
+		    target);
+	}
+
+	(void) printf("injected %s: vdev=%" PRIu64
+	    " metaslab=%" PRIu64 " offset=%" PRIu64 " size=%" PRIu64 "\n",
+	    zmca.zmca_name, zmca.zmca_vdev, zmca.zmca_metaslab,
+	    zmca.zmca_offset, zmca.zmca_size);
+	spa_close(spa, FTAG);
+}
+
 static int
 zhack_do_metaslab(int argc, char **argv)
 {
@@ -801,6 +1207,8 @@ zhack_do_metaslab(int argc, char **argv)
 	subcommand = argv[0];
 	if (strcmp(subcommand, "leak") == 0) {
 		zhack_do_metaslab_leak(argc, argv);
+	} else if (strcmp(subcommand, "corrupt") == 0) {
+		zhack_do_metaslab_corrupt(argc, argv);
 	} else {
 		(void) fprintf(stderr, "error: unknown subcommand: %s\n",
 		    subcommand);
@@ -1372,6 +1780,8 @@ main(int argc, char **argv)
 		rv = zhack_do_action(argc, argv);
 	} else if (strcmp(subcommand, "feature") == 0) {
 		rv = zhack_do_feature(argc, argv);
+	} else if (strcmp(subcommand, "mmp") == 0) {
+		rv = zhack_do_mmp(argc, argv);
 	} else if (strcmp(subcommand, "label") == 0) {
 		return (zhack_do_label(argc, argv));
 	} else if (strcmp(subcommand, "metaslab") == 0) {

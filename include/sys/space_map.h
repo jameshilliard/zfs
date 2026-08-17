@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
@@ -208,9 +198,22 @@ boolean_t sm_entry_is_double_word(uint64_t e);
 
 typedef int (*sm_cb_t)(space_map_entry_t *sme, void *arg);
 
+typedef struct space_map_load_result {
+	/* Allocated bytes reconstructed from the entries that were loaded. */
+	uint64_t smlr_allocated;
+	uint64_t smlr_repaired_entries;
+	uint64_t smlr_affected_bytes;
+	space_map_entry_t smlr_first_entry;
+	space_map_entry_t smlr_last_entry;
+	uint64_t smlr_first_free_bytes;
+	uint64_t smlr_last_free_bytes;
+} space_map_load_result_t;
+
 int space_map_load(space_map_t *sm, zfs_range_tree_t *rt, maptype_t maptype);
 int space_map_load_length(space_map_t *sm, zfs_range_tree_t *rt,
     maptype_t maptype, uint64_t length);
+int space_map_load_length_repair(space_map_t *sm, zfs_range_tree_t *rt,
+    uint64_t length, space_map_load_result_t *result);
 int space_map_iterate(space_map_t *sm, uint64_t length,
     sm_cb_t callback, void *arg);
 int space_map_incremental_destroy(space_map_t *sm, sm_cb_t callback, void *arg,

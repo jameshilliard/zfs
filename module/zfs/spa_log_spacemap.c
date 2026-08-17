@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -1437,14 +1427,19 @@ out:
 	for (metaslab_t *m = avl_first(&spa->spa_metaslabs_by_flushed);
 	    m != NULL; m = AVL_NEXT(&spa->spa_metaslabs_by_flushed, m)) {
 		mutex_enter(&m->ms_lock);
-		m->ms_allocated_space = space_map_allocated(m->ms_sm) +
-		    zfs_range_tree_space(m->ms_unflushed_allocs) -
-		    zfs_range_tree_space(m->ms_unflushed_frees);
+		if (m->ms_load_state != METASLAB_LOAD_UNLOADABLE &&
+		    !m->ms_smp_alloc_invalid) {
+			m->ms_allocated_space = space_map_allocated(m->ms_sm) +
+			    zfs_range_tree_space(m->ms_unflushed_allocs) -
+			    zfs_range_tree_space(m->ms_unflushed_frees);
 
-		metaslab_space_update(m->ms_group,
-		    zfs_range_tree_space(m->ms_unflushed_allocs), 0, 0);
-		metaslab_space_update(m->ms_group,
-		    -zfs_range_tree_space(m->ms_unflushed_frees), 0, 0);
+			metaslab_space_update(m->ms_group,
+			    zfs_range_tree_space(m->ms_unflushed_allocs),
+			    0, 0);
+			metaslab_space_update(m->ms_group,
+			    -zfs_range_tree_space(m->ms_unflushed_frees),
+			    0, 0);
+		}
 
 		ASSERT0(m->ms_weight & METASLAB_ACTIVE_MASK);
 		metaslab_recalculate_weight_and_sort(m);
@@ -1453,8 +1448,8 @@ out:
 		    metaslab_unflushed_changes_memused(m);
 
 		if (metaslab_debug_load && m->ms_sm != NULL) {
-			VERIFY0(metaslab_load(m));
-			metaslab_set_selected_txg(m, 0);
+			if (metaslab_load(m) == 0)
+				metaslab_set_selected_txg(m, 0);
 		}
 		mutex_exit(&m->ms_lock);
 	}

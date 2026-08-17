@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -3716,6 +3706,20 @@ dsl_scan_async_block_should_pause(dsl_scan_t *scn)
 		return (B_TRUE);
 	}
 
+	/*
+	 * Async frees of deduplicated or cloned blocks dirty DDT/BRT
+	 * ZAPs in this txg's sync context, which is not limited by the
+	 * write throttle.  Pause if this txg has already accumulated too
+	 * much dirty data, including the reservations for DDT/BRT updates
+	 * that have not been applied yet at this point of the sync.
+	 */
+	dsl_pool_t *dp = scn->scn_dp;
+	uint64_t txg = spa_syncing_txg(dp->dp_spa) & TXG_MASK;
+	if (dp->dp_dirty_pertxg[txg] + dp->dp_sync_reserve_pertxg[txg] >
+	    zfs_dirty_data_max / 2) {
+		return (B_TRUE);
+	}
+
 	elapsed_nanosecs = getlrtime() - scn->scn_sync_start_time;
 	return (elapsed_nanosecs / (NANOSEC / 2) > zfs_txg_timeout ||
 	    (NSEC2MSEC(elapsed_nanosecs) > scn->scn_async_block_min_time_ms &&
@@ -3746,6 +3750,20 @@ dsl_scan_free_block_cb(void *arg, const blkptr_t *bp, dmu_tx_t *tx)
 		 * async I/O (dedup, clone or gang block).
 		 */
 		scn->scn_async_frees_this_txg++;
+
+		/*
+		 * Reserve dirty space for the DDT/BRT ZAP updates this
+		 * free will produce later in this txg's sync, providing
+		 * feedback for the pause check above.
+		 */
+		spa_t *spa = scn->scn_dp->dp_spa;
+		uint64_t space = 0;
+		if (BP_GET_DEDUP(bp))
+			space = ddt_sync_dirty_est(spa);
+		else if (brt_maybe_exists(spa, bp))
+			space = brt_sync_dirty_est(spa);
+		dsl_pool_sync_reserve(scn->scn_dp, space, tx);
+
 		zio_nowait(zio);
 
 		/*
