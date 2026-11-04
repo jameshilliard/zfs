@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -67,10 +57,11 @@ typedef int	vdev_init_func_t(spa_t *spa, nvlist_t *nv, void **tsd);
 typedef void	vdev_kobj_post_evt_func_t(vdev_t *vd);
 typedef void	vdev_fini_func_t(vdev_t *vd);
 typedef int	vdev_open_func_t(vdev_t *vd, uint64_t *size, uint64_t *max_size,
-    uint64_t *ashift, uint64_t *pshift);
+    uint64_t *ashift, uint64_t *pshift, cred_t *cr);
 typedef void	vdev_close_func_t(vdev_t *vd);
 typedef uint64_t vdev_asize_func_t(vdev_t *vd, uint64_t psize, uint64_t txg);
-typedef uint64_t vdev_min_asize_func_t(vdev_t *vd);
+typedef uint64_t vdev_min_asize_func_t(vdev_t *pvd, vdev_t *cvd);
+typedef uint64_t vdev_min_attach_size_func_t(vdev_t *vd);
 typedef uint64_t vdev_min_alloc_func_t(vdev_t *vd);
 typedef void	vdev_io_start_func_t(zio_t *zio);
 typedef void	vdev_io_done_func_t(zio_t *zio);
@@ -94,6 +85,8 @@ typedef uint64_t vdev_rebuild_asize_func_t(vdev_t *vd, uint64_t start,
     uint64_t size, uint64_t max_segment);
 typedef void vdev_metaslab_init_func_t(vdev_t *vd, uint64_t *startp,
     uint64_t *sizep);
+typedef uint64_t vdev_alloc_factor_func_t(vdev_t *vd);
+typedef void vdev_metaslab_size_func_t(vdev_t *vd, uint64_t *shiftp);
 typedef void vdev_config_generate_func_t(vdev_t *vd, nvlist_t *nv);
 typedef uint64_t vdev_nparity_func_t(vdev_t *vd);
 typedef uint64_t vdev_ndisks_func_t(vdev_t *vd);
@@ -106,6 +99,7 @@ typedef const struct vdev_ops {
 	vdev_asize_func_t		*vdev_op_psize_to_asize;
 	vdev_asize_func_t		*vdev_op_asize_to_psize;
 	vdev_min_asize_func_t		*vdev_op_min_asize;
+	vdev_min_attach_size_func_t		*vdev_op_min_attach_size;
 	vdev_min_alloc_func_t		*vdev_op_min_alloc;
 	vdev_io_start_func_t		*vdev_op_io_start;
 	vdev_io_done_func_t		*vdev_op_io_done;
@@ -121,6 +115,8 @@ typedef const struct vdev_ops {
 	vdev_nparity_func_t		*vdev_op_nparity;
 	vdev_ndisks_func_t		*vdev_op_ndisks;
 	vdev_kobj_post_evt_func_t	*vdev_op_kobj_evt_post;
+	vdev_alloc_factor_func_t	*vdev_op_alloc_factor;
+	vdev_metaslab_size_func_t	*vdev_op_metaslab_size;
 	char				vdev_op_type[16];
 	boolean_t			vdev_op_leaf;
 } vdev_ops_t;
@@ -416,6 +412,7 @@ struct vdev {
 	boolean_t	vdev_isspare;	/* was a hot spare		*/
 	boolean_t	vdev_isl2cache;	/* was a l2cache device		*/
 	boolean_t	vdev_copy_uberblocks;  /* post expand copy uberblocks */
+	boolean_t	vdev_tail_labels_foreign; /* labels 2-3 are not ours */
 	boolean_t	vdev_resilver_deferred;  /* resilver deferred */
 	boolean_t	vdev_kobj_flag; /* kobj event record */
 	boolean_t	vdev_attaching; /* vdev attach ashift handling */
@@ -557,6 +554,25 @@ typedef struct vdev_label {
 #define	VDEV_LABEL_END_SIZE	(2 * sizeof (vdev_label_t))
 #define	VDEV_LABELS		4
 #define	VDEV_BEST_LABEL		VDEV_LABELS
+
+/*
+ * Subsets of the labels, for the routines which read them.  Labels 0 and 1
+ * sit at fixed offsets from the start of the device; labels 2 and 3 sit at
+ * offsets relative to its end, and so move whenever the device is resized.
+ */
+#define	VDEV_LABELS_HEAD	0x3
+#define	VDEV_LABELS_TAIL	0xc
+#define	VDEV_LABELS_ALL		(VDEV_LABELS_HEAD | VDEV_LABELS_TAIL)
+
+/*
+ * The labels of a vdev which are known to describe the pool it belongs to.
+ * vdev_validate() drops the trailing pair when it finds another pool's
+ * labels there, which is what a vdev grown over an older pool is left with
+ * until the next sync rewrites them.
+ */
+#define	VDEV_TRUSTED_LABELS(vd)	\
+	((vd)->vdev_tail_labels_foreign ? VDEV_LABELS_HEAD : VDEV_LABELS_ALL)
+
 #define	VDEV_OFFSET_IS_LABEL(vd, off)                           \
 	(((off) < VDEV_LABEL_START_SIZE) ||                     \
 	((off) >= ((vd)->vdev_psize - VDEV_LABEL_END_SIZE)))
@@ -614,6 +630,9 @@ extern vdev_ops_t vdev_missing_ops;
 extern vdev_ops_t vdev_hole_ops;
 extern vdev_ops_t vdev_spare_ops;
 extern vdev_ops_t vdev_indirect_ops;
+extern vdev_ops_t vdev_anyraid_ops;
+
+extern zio_vsd_ops_t vdev_mirror_vsd_ops;
 
 /*
  * Common size functions
@@ -622,8 +641,10 @@ extern void vdev_default_xlate(vdev_t *vd, const zfs_range_seg64_t *logical_rs,
     zfs_range_seg64_t *physical_rs, zfs_range_seg64_t *remain_rs);
 extern uint64_t vdev_default_psize(vdev_t *vd, uint64_t asize, uint64_t txg);
 extern uint64_t vdev_default_asize(vdev_t *vd, uint64_t psize, uint64_t txg);
-extern uint64_t vdev_default_min_asize(vdev_t *vd);
+extern uint64_t vdev_default_min_asize(vdev_t *pvd, vdev_t *cvd);
+extern uint64_t vdev_default_min_attach_size(vdev_t *vd);
 extern uint64_t vdev_get_min_asize(vdev_t *vd);
+extern uint64_t vdev_get_min_attach_size(vdev_t *vd);
 extern void vdev_set_min_asize(vdev_t *vd);
 extern uint64_t vdev_get_nparity(vdev_t *vd);
 extern uint64_t vdev_get_ndisks(vdev_t *vd);

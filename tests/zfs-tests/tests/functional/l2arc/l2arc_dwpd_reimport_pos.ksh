@@ -1,8 +1,6 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
-#
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
 # You may only use this file in accordance with the terms of version
@@ -10,9 +8,7 @@
 #
 # A full copy of the text of the CDDL should have accompanied this
 # source.  A copy of the CDDL is also available via the Internet at
-# http://www.illumos.org/license/CDDL.
-#
-# CDDL HEADER END
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -122,12 +118,23 @@ if [[ $writes_before -eq 0 ]]; then
 	log_fail "No L2ARC writes before export - DWPD may be too restrictive"
 fi
 
-# Export and import pool
-log_must zpool export $TESTPOOL
-log_must zpool import -d $VDIR $TESTPOOL
-
-# Wait for rebuild to complete
-log_must sleep 5
+#
+# Export and import pool, and wait for the L2ARC rebuild.  The rebuild
+# gives up if the system is low on memory (l2_rebuild_lowmem), as it
+# can be on FreeBSD right after the fills above.  Give the memory time
+# to recover and import again.
+#
+typeset -i tries=0
+while true; do
+	lowmem=$(kstat arcstats.l2_rebuild_lowmem)
+	log_must zpool export $TESTPOOL
+	log_must zpool import -d $VDIR $TESTPOOL
+	log_must sleep 5
+	[[ $(kstat arcstats.l2_rebuild_lowmem) -eq $lowmem ]] && break
+	(( ++tries < 5 )) || break
+	log_note "L2ARC rebuild stopped for low memory, importing again"
+	log_must sleep 5
+done
 
 # Verify L2ARC is populated after import
 typeset l2_size_after=$(kstat arcstats.l2_size)

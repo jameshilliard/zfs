@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -27,7 +17,6 @@
 #include <alloca.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <libintl.h>
 #include <math.h>
 #include <poll.h>
 #include <stdarg.h>
@@ -58,23 +47,23 @@ libzfs_error_init(int error)
 {
 	switch (error) {
 	case ENXIO:
-		return (dgettext(TEXT_DOMAIN, "The ZFS modules are not "
+		return ("The ZFS modules are not "
 		    "loaded.\nTry running 'modprobe zfs' as root "
-		    "to load them."));
+		    "to load them.");
 	case ENOENT:
-		return (dgettext(TEXT_DOMAIN, "/dev/zfs and /proc/self/mounts "
+		return ("/dev/zfs and /proc/self/mounts "
 		    "are required.\nTry running 'udevadm trigger' and 'mount "
-		    "-t proc proc /proc' as root."));
+		    "-t proc proc /proc' as root.");
 	case ENOEXEC:
-		return (dgettext(TEXT_DOMAIN, "The ZFS modules cannot be "
+		return ("The ZFS modules cannot be "
 		    "auto-loaded.\nTry running 'modprobe zfs' as "
-		    "root to manually load them."));
+		    "root to manually load them.");
 	case EACCES:
-		return (dgettext(TEXT_DOMAIN, "Permission denied the "
-		    "ZFS utilities must be run as root."));
+		return ("Permission denied the "
+		    "ZFS utilities must be run as root.");
 	default:
-		return (dgettext(TEXT_DOMAIN, "Failed to initialize the "
-		    "libzfs library."));
+		return ("Failed to initialize the "
+		    "libzfs library.");
 	}
 }
 
@@ -202,7 +191,7 @@ find_shares_object(differ_info_t *di)
 
 	if (stat64(fullpath, &sb) != 0) {
 		(void) snprintf(di->errbuf, sizeof (di->errbuf),
-		    dgettext(TEXT_DOMAIN, "Cannot stat %s"), fullpath);
+		    "Cannot stat %s", fullpath);
 		return (zfs_error(di->zhp->zfs_hdl, EZFS_DIFF, di->errbuf));
 	}
 
@@ -257,38 +246,38 @@ zfs_userns(zfs_handle_t *zhp, const char *nspath, int attach)
 
 	if (attach) {
 		(void) snprintf(errbuf, sizeof (errbuf),
-		    dgettext(TEXT_DOMAIN, "cannot add '%s' to namespace"),
+		    "cannot add '%s' to namespace",
 		    zhp->zfs_name);
 	} else {
 		(void) snprintf(errbuf, sizeof (errbuf),
-		    dgettext(TEXT_DOMAIN, "cannot remove '%s' from namespace"),
+		    "cannot remove '%s' from namespace",
 		    zhp->zfs_name);
 	}
 
 	switch (zhp->zfs_type) {
 	case ZFS_TYPE_VOLUME:
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-		    "volumes can not be namespaced"));
+		zfs_error_aux(hdl,
+		    "volumes can not be namespaced");
 		return (zfs_error(hdl, EZFS_BADTYPE, errbuf));
 	case ZFS_TYPE_SNAPSHOT:
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-		    "snapshots can not be namespaced"));
+		zfs_error_aux(hdl,
+		    "snapshots can not be namespaced");
 		return (zfs_error(hdl, EZFS_BADTYPE, errbuf));
 	case ZFS_TYPE_BOOKMARK:
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-		    "bookmarks can not be namespaced"));
+		zfs_error_aux(hdl,
+		    "bookmarks can not be namespaced");
 		return (zfs_error(hdl, EZFS_BADTYPE, errbuf));
 	case ZFS_TYPE_VDEV:
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-		    "vdevs can not be namespaced"));
+		zfs_error_aux(hdl,
+		    "vdevs can not be namespaced");
 		return (zfs_error(hdl, EZFS_BADTYPE, errbuf));
 	case ZFS_TYPE_INVALID:
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-		    "invalid zfs_type_t: ZFS_TYPE_INVALID"));
+		zfs_error_aux(hdl,
+		    "invalid zfs_type_t: ZFS_TYPE_INVALID");
 		return (zfs_error(hdl, EZFS_BADTYPE, errbuf));
 	case ZFS_TYPE_POOL:
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-		    "pools can not be namespaced"));
+		zfs_error_aux(hdl,
+		    "pools can not be namespaced");
 		return (zfs_error(hdl, EZFS_BADTYPE, errbuf));
 	case ZFS_TYPE_FILESYSTEM:
 		break;

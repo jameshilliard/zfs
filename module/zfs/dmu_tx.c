@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -36,6 +26,7 @@
 #include <sys/dsl_pool.h>
 #include <sys/zap_impl.h>
 #include <sys/spa.h>
+#include <sys/brt.h>
 #include <sys/brt_impl.h>
 #include <sys/sa.h>
 #include <sys/sa_impl.h>
@@ -561,6 +552,12 @@ dmu_tx_count_clone(dmu_tx_hold_t *txh, uint64_t off, uint64_t len,
 	ASSERT(blksz != 0);
 	ASSERT0(off % blksz);
 
+	/*
+	 * The last block of the range is cloned in full even if the range
+	 * covers it only partially, in case it is the last block of the file.
+	 */
+	len = P2ROUNDUP(len, (uint64_t)blksz);
+
 	(void) zfs_refcount_add_many(&txh->txh_memory_tohold,
 	    len / blksz * sizeof (brt_entry_t), FTAG);
 
@@ -577,12 +574,21 @@ dmu_tx_count_clone(dmu_tx_hold_t *txh, uint64_t off, uint64_t len,
 		err = dmu_tx_check_ioerr(zio, dn, 1, i);
 		if (err != 0) {
 			tx->tx_err = err;
-			break;
+			(void) zio_wait(zio);
+			return;
 		}
 	}
 	err = zio_wait(zio);
-	if (err != 0)
+	if (err != 0) {
 		tx->tx_err = err;
+		return;
+	}
+
+	/*
+	 * Each cloned block may dirty one BRT ZAP leaf in sync context.
+	 */
+	tx->tx_sync_reserve += len / blksz *
+	    brt_sync_dirty_est(tx->tx_pool->dp_spa);
 }
 
 void
@@ -964,15 +970,14 @@ dmu_tx_delay(dmu_tx_t *tx, uint64_t dirty)
 	/* Calculate minimum transaction time for the dirty data amount. */
 	delay_min_bytes =
 	    zfs_dirty_data_max * zfs_delay_min_dirty_percent / 100;
-	if (dirty > delay_min_bytes) {
+	if (dirty >= zfs_dirty_data_max) {
 		/*
-		 * The caller has already waited until we are under the max.
-		 * We make them pass us the amount of dirty data so we don't
-		 * have to handle the case of it being >= the max, which
-		 * could cause a divide-by-zero if it's == the max.
+		 * The sync context reservations added on top of the dirty
+		 * data may push the sum beyond the max, as may the dirty
+		 * data itself growing after the caller has checked it.
 		 */
-		ASSERT3U(dirty, <, zfs_dirty_data_max);
-
+		tx_time = zfs_delay_max_ns;
+	} else if (dirty > delay_min_bytes) {
 		tx_time = zfs_delay_scale * (dirty - delay_min_bytes) /
 		    (zfs_dirty_data_max - dirty);
 	}
@@ -1145,6 +1150,8 @@ dmu_tx_try_assign(dmu_tx_t *tx)
 			return (err);
 	}
 
+	dsl_pool_sync_reserve(tx->tx_pool, tx->tx_sync_reserve, tx);
+
 	DMU_TX_STAT_BUMP(dmu_tx_assigned);
 
 	return (0);
@@ -1231,6 +1238,7 @@ dmu_tx_unassign(dmu_tx_t *tx)
 int
 dmu_tx_assign(dmu_tx_t *tx, dmu_tx_flag_t flags)
 {
+	spa_t *spa = tx->tx_pool->dp_spa;
 	int err;
 
 	ASSERT0(tx->tx_txg);
@@ -1263,13 +1271,13 @@ dmu_tx_assign(dmu_tx_t *tx, dmu_tx_flag_t flags)
 				 * suspend, so treat it as a normal retry.
 				 */
 				err = SET_ERROR(ERESTART);
-			else if ((flags & DMU_TX_WAIT) &&
-			    spa_get_failmode(tx->tx_pool->dp_spa) ==
+			else if (spa_get_failmode(spa) ==
 			    ZIO_FAILURE_MODE_CONTINUE)
 				/*
-				 * Caller wants to wait, but pool config is
-				 * overriding that, so return EIO to be
-				 * propagated back to userspace.
+				 * Pool config says not to block,
+				 * so return EIO to be propagated
+				 * back to userspace, whatever the
+				 * caller's flags.
 				 */
 				err = SET_ERROR(EIO);
 			else
@@ -1282,6 +1290,14 @@ dmu_tx_assign(dmu_tx_t *tx, dmu_tx_flag_t flags)
 		 * want to block.
 		 */
 		if (err != ERESTART || !(flags & DMU_TX_WAIT)) {
+			/*
+			 * A NOWAIT caller answers ERESTART with
+			 * dmu_tx_wait(). On a suspended pool, that
+			 * must block until resume, or the caller
+			 * spins.
+			 */
+			if (suspended && err == ERESTART)
+				tx->tx_break_on_suspend = B_FALSE;
 			ASSERT(err == EDQUOT || err == ENOSPC ||
 			    err == ERESTART || err == EIO);
 			return (err);
@@ -1350,15 +1366,26 @@ dmu_tx_wait(dmu_tx_t *tx)
 		/*
 		 * dmu_tx_try_assign() has determined that we need to wait
 		 * because we've consumed much or all of the dirty buffer
-		 * space.
+		 * space.  The hard limit though is rarely reached, so check
+		 * it unlocked, taking the lock only if we may have to wait.
 		 */
-		mutex_enter(&dp->dp_lock);
-		if (dp->dp_dirty_total >= zfs_dirty_data_max)
+		if (dp->dp_dirty_total >= zfs_dirty_data_max) {
 			DMU_TX_STAT_BUMP(dmu_tx_dirty_over_max);
-		while (dp->dp_dirty_total >= zfs_dirty_data_max)
-			cv_wait(&dp->dp_spaceavail_cv, &dp->dp_lock);
-		dirty = dp->dp_dirty_total;
-		mutex_exit(&dp->dp_lock);
+			mutex_enter(&dp->dp_lock);
+			/*
+			 * Register before loading dp_dirty_total, since
+			 * dsl_pool_dirty_delta() only signals when it sees
+			 * dp_dirty_waiters.  See the comment there about
+			 * ordering.
+			 */
+			dp->dp_dirty_waiters++;
+			membar_sync();
+			while (dp->dp_dirty_total >= zfs_dirty_data_max)
+				cv_wait(&dp->dp_spaceavail_cv, &dp->dp_lock);
+			dp->dp_dirty_waiters--;
+			mutex_exit(&dp->dp_lock);
+		}
+		dirty = dp->dp_dirty_total + dp->dp_sync_reserve_total;
 
 		dmu_tx_delay(tx, dirty);
 
@@ -1679,7 +1706,6 @@ dmu_tx_fini(void)
 	}
 }
 
-#if defined(_KERNEL)
 EXPORT_SYMBOL(dmu_tx_create);
 EXPORT_SYMBOL(dmu_tx_hold_write);
 EXPORT_SYMBOL(dmu_tx_hold_write_by_dnode);
@@ -1702,4 +1728,3 @@ EXPORT_SYMBOL(dmu_tx_do_callbacks);
 EXPORT_SYMBOL(dmu_tx_hold_spill);
 EXPORT_SYMBOL(dmu_tx_hold_sa_create);
 EXPORT_SYMBOL(dmu_tx_hold_sa);
-#endif

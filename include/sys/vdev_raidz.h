@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (C) 2016 Gvozden Neskovic <neskovic@compeng.uni-frankfurt.de>.
@@ -64,6 +54,7 @@ void raidz_dtl_reassessed(vdev_t *);
 boolean_t vdev_sit_out_reads(vdev_t *, zio_flag_t);
 void vdev_raidz_sit_child(vdev_t *, uint64_t);
 void vdev_raidz_unsit_child(vdev_t *);
+boolean_t vdev_raidz_same_logical_width(vdev_t *, uint64_t, uint64_t);
 
 extern const zio_vsd_ops_t vdev_raidz_vsd_ops;
 
@@ -101,10 +92,14 @@ typedef struct vdev_raidz_expand {
 	 * Lowest offset of a failed expansion i/o.  The expansion will retry
 	 * from here.  Once the expansion thread notices the failure and exits,
 	 * vre_failed_offset is reset back to UINT64_MAX, and
-	 * vre_waiting_for_resilver will be set.
+	 * vre_waiting_for_resilver will be set, unless vre_dtl_gen shows
+	 * that the DTLs were reassessed during that pass.
 	 */
 	uint64_t vre_failed_offset;
 	boolean_t vre_waiting_for_resilver;
+
+	/* Incremented by raidz_dtl_reassessed() */
+	uint64_t vre_dtl_gen;
 
 	/*
 	 * Offset that is completing each txg

@@ -1,24 +1,14 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -69,7 +59,7 @@ function getddtstats
 	[ -z "${gds.incore}" ] && gds.incore="0"
 	[ -z "${gds.cached}" ] && gds.cached="0"
 
-	return true
+	return 0
 }
 
 # Confirm that nothing happens on a standard pool config.
@@ -89,21 +79,27 @@ MNTPOINT=$(get_prop mountpoint $DATASET)
 
 log_note "Generating dataset ..."
 typeset -i i=0
-while (( i < 16384 )); do
-	echo -n $i > $MNTPOINT/f.$i
+while (( i < 8192 )); do
+        (
+                echo -n $i > $MNTPOINT/f.$i
 
-	# Create some copies of the original mainly for the purpose of
-	# having duplicate entries.  About half will have no copies, while
-	# the remainder will have an equal distribution of 1-4 copies,
-	# depending on the number put into the original.
-	typeset -i j
-	((j = i % 8))
-	while (( j < 4 )); do
-		cp $MNTPOINT/f.$i $MNTPOINT/f.$i.$j
-		((j += 1))
-	done
-	((i += 1))
+                # Create some copies of the original mainly for the purpose of
+                # having duplicate entries.  About half will have no copies, while
+                # the remainder will have an equal distribution of 1-4 copies,
+                # depending on the number put into the original.
+                typeset -i j
+                ((j = i % 8))
+                while (( j < 4 )); do
+                        cp $MNTPOINT/f.$i $MNTPOINT/f.$i.$j
+                        ((j += 1))
+                done
+        ) &
+        if [ $(($i % 8)) == 0 ] ; then
+                wait
+        fi
+        ((i += 1))
 done
+wait
 
 # Force the DDT logs to disk with a scrub so they can be prefetched
 log_must zpool scrub -w $TESTPOOL

@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 #include <sys/zfs_context.h>
@@ -41,7 +31,8 @@
  * Returns 0 on success underlying error on failure.
  */
 int
-zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
+zfs_file_open(const char *path, int flags, int mode, cred_t *cr,
+    zfs_file_t **zfpp)
 {
 	struct file *filp;
 	int saved_umask;
@@ -52,7 +43,9 @@ zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 	if (flags & O_CREAT)
 		saved_umask = xchg(&current->fs->umask, 0);
 
+	const cred_t *oldcr = override_creds(cr);
 	filp = filp_open(path, flags, mode);
+	revert_creds(oldcr);
 
 	if (flags & O_CREAT)
 		(void) xchg(&current->fs->umask, saved_umask);
@@ -60,14 +53,30 @@ zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 	if (IS_ERR(filp))
 		return (-PTR_ERR(filp));
 
-	*fpp = filp;
+	*zfpp = filp;
 	return (0);
 }
 
 void
-zfs_file_close(zfs_file_t *fp)
+zfs_file_close(zfs_file_t *zfp)
 {
+	struct file *fp = zfp;
 	filp_close(fp, 0);
+}
+
+/*
+ * A job control stop (^Z) interrupts a blocking pipe or socket read/write
+ * just like any other signal.  issig() stops the thread in place and
+ * consumes SIGSTOP/SIGTSTP, so the caller can retry the I/O afterwards
+ * instead of failing a long running send or receive.
+ */
+static boolean_t
+zfs_file_restart(ssize_t rc)
+{
+	if (rc < 0 && rc != -ERESTARTSYS && rc != -EINTR)
+		return (B_FALSE);
+
+	return (signal_pending(current) && !issig());
 }
 
 /*
@@ -82,20 +91,28 @@ zfs_file_close(zfs_file_t *fp)
  * Returns 0 on success errno on failure.
  */
 int
-zfs_file_write(zfs_file_t *fp, const void *buf, size_t count, ssize_t *resid)
+zfs_file_write(zfs_file_t *zfp, const void *buf, size_t count, ssize_t *resid)
 {
+	struct file *fp = zfp;
 	loff_t off = fp->f_pos;
+	size_t done = 0;
 	ssize_t rc;
 
-	rc = kernel_write(fp, buf, count, &off);
-	if (rc < 0)
+	do {
+		rc = kernel_write(fp, (const char *)buf + done, count - done,
+		    &off);
+		if (rc > 0)
+			done += rc;
+	} while (done < count && zfs_file_restart(rc));
+
+	if (rc < 0 && done == 0)
 		return (-rc);
 
 	fp->f_pos = off;
 
 	if (resid) {
-		*resid = count - rc;
-	} else if (rc != count) {
+		*resid = count - done;
+	} else if (done != count) {
 		return (EIO);
 	}
 
@@ -114,10 +131,11 @@ zfs_file_write(zfs_file_t *fp, const void *buf, size_t count, ssize_t *resid)
  * Returns 0 on success errno on failure.
  */
 int
-zfs_file_pwrite(zfs_file_t *fp, const void *buf, size_t count, loff_t off,
+zfs_file_pwrite(zfs_file_t *zfp, const void *buf, size_t count, loff_t off,
     uint8_t ashift, ssize_t *resid)
 {
 	(void) ashift;
+	struct file *fp = zfp;
 	ssize_t rc;
 
 	rc  = kernel_write(fp, buf, count, &off);
@@ -145,12 +163,15 @@ zfs_file_pwrite(zfs_file_t *fp, const void *buf, size_t count, loff_t off,
  * Returns 0 on success errno on failure.
  */
 int
-zfs_file_read(zfs_file_t *fp, void *buf, size_t count, ssize_t *resid)
+zfs_file_read(zfs_file_t *zfp, void *buf, size_t count, ssize_t *resid)
 {
+	struct file *fp = zfp;
 	loff_t off = fp->f_pos;
 	ssize_t rc;
 
-	rc = kernel_read(fp, buf, count, &off);
+	do {
+		rc = kernel_read(fp, buf, count, &off);
+	} while (rc < 0 && zfs_file_restart(rc));
 	if (rc < 0)
 		return (-rc);
 
@@ -177,9 +198,10 @@ zfs_file_read(zfs_file_t *fp, void *buf, size_t count, ssize_t *resid)
  * Returns 0 on success errno on failure.
  */
 int
-zfs_file_pread(zfs_file_t *fp, void *buf, size_t count, loff_t off,
+zfs_file_pread(zfs_file_t *zfp, void *buf, size_t count, loff_t off,
     ssize_t *resid)
 {
+	struct file *fp = zfp;
 	ssize_t rc;
 
 	rc = kernel_read(fp, buf, count, &off);
@@ -205,8 +227,9 @@ zfs_file_pread(zfs_file_t *fp, void *buf, size_t count, loff_t off,
  * Returns 0 on success errno on failure (ESPIPE for non seekable types)
  */
 int
-zfs_file_seek(zfs_file_t *fp, loff_t *offp, int whence)
+zfs_file_seek(zfs_file_t *zfp, loff_t *offp, int whence)
 {
+	struct file *fp = zfp;
 	loff_t rc;
 
 	if (*offp < 0)
@@ -232,8 +255,9 @@ zfs_file_seek(zfs_file_t *fp, loff_t *offp, int whence)
  * Returns 0 on success or error code of underlying getattr call on failure.
  */
 int
-zfs_file_getattr(zfs_file_t *filp, zfs_file_attr_t *zfattr)
+zfs_file_getattr(zfs_file_t *zfp, zfs_file_attr_t *zfattr)
 {
+	struct file *filp = zfp;
 	struct kstat stat;
 	int rc;
 
@@ -257,8 +281,9 @@ zfs_file_getattr(zfs_file_t *filp, zfs_file_attr_t *zfattr)
  * Returns 0 on success or error code of underlying sync call on failure.
  */
 int
-zfs_file_fsync(zfs_file_t *filp, int flags)
+zfs_file_fsync(zfs_file_t *zfp, int flags)
 {
+	struct file *filp = zfp;
 	int datasync = 0;
 	int error;
 
@@ -278,8 +303,10 @@ zfs_file_fsync(zfs_file_t *filp, int flags)
  * len - length to zero or deallocate
  */
 int
-zfs_file_deallocate(zfs_file_t *fp, loff_t offset, loff_t len)
+zfs_file_deallocate(zfs_file_t *zfp, loff_t offset, loff_t len)
 {
+	struct file *fp = zfp;
+
 	/*
 	 * When supported by the underlying file system preferentially
 	 * use the fallocate() callback to preallocate the space.
@@ -303,8 +330,9 @@ zfs_file_deallocate(zfs_file_t *fp, loff_t offset, loff_t len)
  * Returns current file offset.
  */
 loff_t
-zfs_file_off(zfs_file_t *fp)
+zfs_file_off(zfs_file_t *zfp)
 {
+	struct file *fp = zfp;
 	return (fp->f_pos);
 }
 
@@ -316,8 +344,9 @@ zfs_file_off(zfs_file_t *fp)
  * Returns pointer to file private data.
  */
 void *
-zfs_file_private(zfs_file_t *fp)
+zfs_file_private(zfs_file_t *zfp)
 {
+	struct file *fp = zfp;
 	return (fp->private_data);
 }
 
@@ -355,7 +384,8 @@ zfs_file_get(int fd)
  * fp - input file struct pointer
  */
 void
-zfs_file_put(zfs_file_t *fp)
+zfs_file_put(zfs_file_t *zfp)
 {
+	struct file *fp = zfp;
 	fput(fp);
 }

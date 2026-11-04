@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -28,7 +18,7 @@
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <sys/zio.h>
-#include <umem.h>
+#include <sys/kmem.h>
 #include <sys/vdev_raidz.h>
 #include <sys/vdev_raidz_impl.h>
 #include <assert.h>
@@ -308,7 +298,7 @@ fini_raidz_map(zio_t **zio, raidz_map_t **rm)
 {
 	vdev_raidz_map_free(*rm);
 	raidz_free((*zio)->io_abd, (*zio)->io_size);
-	umem_free(*zio, sizeof (zio_t));
+	kmem_free(*zio, sizeof (zio_t));
 
 	*zio = NULL;
 	*rm = NULL;
@@ -326,8 +316,8 @@ init_raidz_golden_map(raidz_test_opts_t *opts, const int parity)
 		fini_raidz_map(&opts->zio_golden, &opts->rm_golden);
 	}
 
-	opts->zio_golden = umem_zalloc(sizeof (zio_t), UMEM_NOFAIL);
-	zio_test = umem_zalloc(sizeof (zio_t), UMEM_NOFAIL);
+	opts->zio_golden = kmem_zalloc(sizeof (zio_t), KM_SLEEP);
+	zio_test = kmem_zalloc(sizeof (zio_t), KM_SLEEP);
 
 	opts->zio_golden->io_offset = zio_test->io_offset = opts->rto_offset;
 	opts->zio_golden->io_size = zio_test->io_size = opts->rto_dsize;
@@ -385,7 +375,7 @@ init_raidz_map(raidz_test_opts_t *opts, zio_t **zio, const int parity)
 	VERIFY(zio);
 	VERIFY(parity <= 3 && parity >= 1);
 
-	*zio = umem_zalloc(sizeof (zio_t), UMEM_NOFAIL);
+	*zio = kmem_zalloc(sizeof (zio_t), KM_SLEEP);
 
 	(*zio)->io_offset = opts->rto_offset;
 	(*zio)->io_size = alloc_dsize;
@@ -690,7 +680,7 @@ sweep_thread(void *arg)
 		mutex_exit(&sem_mtx);
 	}
 
-	umem_free(opts, sizeof (raidz_test_opts_t));
+	kmem_free(opts, sizeof (raidz_test_opts_t));
 
 	/* signal the next thread */
 	mutex_enter(&sem_mtx);
@@ -765,7 +755,7 @@ run_sweep(void)
 		free_slots--;
 		mutex_exit(&sem_mtx);
 
-		opts = umem_zalloc(sizeof (raidz_test_opts_t), UMEM_NOFAIL);
+		opts = kmem_zalloc(sizeof (raidz_test_opts_t), KM_SLEEP);
 		opts->rto_ashift = ashift_v[a];
 		opts->rto_dcols = dcols_v[d];
 		opts->rto_offset = (1ULL << ashift_v[a]) * rand();
@@ -833,7 +823,7 @@ main(int argc, char **argv)
 	kernel_init(SPA_MODE_READ);
 
 	/* setup random data because rand() is not reentrant */
-	rand_data = (int *)umem_alloc(SPA_MAXBLOCKSIZE, UMEM_NOFAIL);
+	rand_data = (int *)kmem_alloc(SPA_MAXBLOCKSIZE, KM_SLEEP);
 	srand((unsigned)time(NULL) * getpid());
 	for (i = 0; i < SPA_MAXBLOCKSIZE / sizeof (int); i++)
 		rand_data[i] = rand();
@@ -850,7 +840,7 @@ main(int argc, char **argv)
 
 	mprotect(rand_data, SPA_MAXBLOCKSIZE, PROT_READ | PROT_WRITE);
 
-	umem_free(rand_data, SPA_MAXBLOCKSIZE);
+	kmem_free(rand_data, SPA_MAXBLOCKSIZE);
 	kernel_fini();
 
 	return (err);

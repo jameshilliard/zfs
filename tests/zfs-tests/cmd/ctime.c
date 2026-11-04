@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -43,6 +33,7 @@
 #include <fcntl.h>
 #include <libgen.h>
 #include <string.h>
+#include <time.h>
 
 #define	ST_ATIME 0
 #define	ST_CTIME 1
@@ -57,6 +48,22 @@ typedef struct timetest {
 } timetest_t;
 
 static char tfile[BUFSIZ] = { 0 };
+
+/*
+ * File timestamps come from the kernel's coarse clock. musl's time()
+ * reads CLOCK_REALTIME, which can be up to a tick ahead of it.
+ */
+static time_t
+coarse_time(void)
+{
+#ifdef CLOCK_REALTIME_COARSE
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_REALTIME_COARSE, &ts) == 0)
+		return (ts.tv_sec);
+#endif
+	return (time(NULL));
+}
 
 /*
  * DESCRIPTION:
@@ -335,7 +342,8 @@ main(void)
 	(void) close(fd);
 
 	for (i = 0; i < NCOMMAND; i++) {
-		time_t t1, t2;
+		time_t t1, t2, before, after;
+		unsigned int remaining;
 
 		/*
 		 * Get original time before operating.
@@ -348,10 +356,17 @@ main(void)
 		}
 
 		/*
-		 * Sleep 2 seconds, then invoke command on given file
+		 * Wait until at least 2 wall-clock seconds have passed.  Sleep
+		 * may be interrupted, or the wall clock may be adjusted.
 		 */
-		(void) sleep(2);
+		before = coarse_time();
+		do {
+			remaining = 2;
+			while (remaining != 0)
+				remaining = sleep(remaining);
+		} while (coarse_time() < before + 2);
 		timetest_table[i].func(tfile);
+		after = time(NULL);
 
 		/*
 		 * Get time after operating.
@@ -365,14 +380,19 @@ main(void)
 
 
 		/*
-		 * Ideally, time change would be exactly two seconds, but allow
-		 * a little slack in case of scheduling delays or similar.
+		 * The operation ran no earlier than two seconds after
+		 * `before` (the sleep) and no later than `after`, so its
+		 * timestamp has to fall in that window.  Comparing against
+		 * the time that actually elapsed rather than against a fixed
+		 * tolerance keeps a loaded machine, where the operation
+		 * itself can take seconds, from failing the test.
 		 */
-		long delta = (long)t2 - (long)t1;
-		if (delta < 2 || delta > 10) {
+		if (t2 < before + 2 || t2 > after) {
 			(void) fprintf(stderr,
-			    "%s: BAD time change: t1(%ld), t2(%ld)\n",
-			    timetest_table[i].name, (long)t1, (long)t2);
+			    "%s: BAD time change: t1(%ld), t2(%ld), "
+			    "expected t2 within [%ld, %ld]\n",
+			    timetest_table[i].name, (long)t1, (long)t2,
+			    (long)before + 2, (long)after);
 			return (1);
 		} else {
 			(void) fprintf(stderr,

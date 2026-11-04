@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
-#
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
 # You may only use this file in accordance with the terms of version
@@ -9,9 +7,7 @@
 #
 # A full copy of the text of the CDDL should have accompanied this
 # source.  A copy of the CDDL is also available via the Internet at
-# http://www.illumos.org/license/CDDL.
-#
-# CDDL HEADER END
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -102,7 +98,10 @@ function verify_origin
 
 function setup_https
 {
-	log_must openssl req -x509 -newkey rsa:4096 -sha256 -days 1 -nodes -keyout "/$TESTPOOL/snakeoil.key" -out "$SSL_CA_CERT_FILE" -subj "/CN=$HTTPS_HOSTNAME"
+	log_must openssl req -x509 -newkey rsa:4096 -sha256 -days 1 -nodes \
+	    -keyout "/$TESTPOOL/snakeoil.key" -out "$SSL_CA_CERT_FILE" \
+	    -subj "/CN=$HTTPS_HOSTNAME" \
+	    -addext "subjectAltName=IP:$HTTPS_HOSTNAME"
 
 	python3 -uc "
 import http.server, ssl, sys, os, time, random

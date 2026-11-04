@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -58,7 +48,7 @@ valstr_bitfield_bits(const valstr_bit_t *table, const size_t nelems,
 	ASSERT(out);
 	size_t n = 0;
 	for (int b = 0; b < nelems; b++) {
-		if (n == outlen)
+		if (n == outlen || n == outlen - 1)
 			break;
 		uint64_t mask = (1ULL << b);
 		out[n++] = (bits & mask) ? table[b].vb_bit : ' ';
@@ -86,7 +76,7 @@ valstr_bitfield_pairs(const valstr_bit_t *table, const size_t nelems,
 		uint64_t mask = (1ULL << b);
 		if (bits & mask) {
 			size_t len = (n > 0) ? 3 : 2;
-			if (n > outlen-len)
+			if (len >= outlen - n)
 				break;
 			if (n > 0)
 				out[n++] = '|';
@@ -119,7 +109,7 @@ valstr_bitfield_str(const valstr_bit_t *table, const size_t nelems,
 			size_t len = strlen(table[b].vb_name);
 			if (n > 0)
 				len++;
-			if (n > outlen-len)
+			if (len >= outlen - n)
 				break;
 			if (n > 0) {
 				out[n++] = ' ';
@@ -209,6 +199,7 @@ _VALSTR_BITFIELD_IMPL(zio_flag,
 	{ '.', "TH", "TRYHARD" },
 	{ '.', "OP", "OPTIONAL" },
 	{ '.', "RD", "DIO_READ" },
+	{ '.', "BQ", "BYPASSED_QUEUE" },
 	{ '.', "DQ", "DONT_QUEUE" },
 	{ '.', "DP", "DONT_PROPAGATE" },
 	{ '.', "BY", "IO_BYPASS" },
@@ -222,6 +213,8 @@ _VALSTR_BITFIELD_IMPL(zio_flag,
 	{ '.', "EX", "REEXECUTED" },
 	{ '.', "DG", "DELEGATED" },
 	{ '.', "PA", "PREALLOCATED" },
+	{ '.', "PO", "POSTREAD" },
+	{ '.', "LW", "LIGHTWEIGHT" },
 )
 
 /*

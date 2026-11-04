@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2011, Lawrence Livermore National Security, LLC.
@@ -165,8 +155,13 @@ is_nametoolong(struct dentry *dentry)
 	    dlen >= ZAP_MAXNAMELEN_NEW);
 }
 
+#if defined(HAVE_IOPS_CREATE_NO_FLAG_ARG)
+ZPL_IDMAP_IOP_DEFINE(int, zpl_create, 3,
+    struct inode *, dir, struct dentry *, dentry, umode_t, mode)
+#else
 ZPL_IDMAP_IOP_DEFINE(int, zpl_create, 4,
     struct inode *, dir, struct dentry *, dentry, umode_t, mode, bool, flag)
+#endif
 {
 	cred_t *cr = CRED();
 	znode_t *zp;
@@ -197,6 +192,12 @@ ZPL_IDMAP_IOP_DEFINE(int, zpl_create, 4,
 		} else {
 			d_instantiate(dentry, ZTOI(zp));
 		}
+	} else {
+		/*
+		 * The entry may exist despite the error, e.g. after a
+		 * failed zil_commit().
+		 */
+		d_drop(dentry);
 	}
 
 	spl_fstrans_unmark(cookie);
@@ -247,6 +248,12 @@ ZPL_IDMAP_IOP_DEFINE(int, zpl_mknod, 4,
 		} else {
 			d_instantiate(dentry, ZTOI(zp));
 		}
+	} else {
+		/*
+		 * The entry may exist despite the error, e.g. after a
+		 * failed zil_commit().
+		 */
+		d_drop(dentry);
 	}
 
 	spl_fstrans_unmark(cookie);
@@ -379,6 +386,12 @@ ZPL_IDMAP_IOP_DEFINE(int, zpl_mkdir, 3,
 		} else {
 			d_instantiate(dentry, ZTOI(zp));
 		}
+	} else {
+		/*
+		 * The entry may exist despite the error, e.g. after a
+		 * failed zil_commit().
+		 */
+		d_drop(dentry);
 	}
 
 	spl_fstrans_unmark(cookie);
@@ -436,41 +449,6 @@ ZPL_IDMAP_IOP_DEFINE(int, zpl_getattr, 4,
 	 */
 
 	error = -zfs_getattr_fast(idmap, request_mask, ip, stat);
-
-#ifdef STATX_BTIME
-	if (request_mask & STATX_BTIME) {
-		stat->btime = zp->z_btime;
-		stat->result_mask |= STATX_BTIME;
-	}
-#endif
-
-#ifdef STATX_CHANGE_COOKIE
-	if (request_mask & STATX_CHANGE_COOKIE) {
-		/*
-		 * knfsd uses the STATX_CHANGE_COOKIE to surface to clients
-		 * change_info4 data, which is used to implement NFS client
-		 * name caching (see RFC 8881 Section 10.8). This number
-		 * should always increase with changes and should not be
-		 * reused. We cannot simply present ctime here because
-		 * ZFS uses a coarse timer to set them, which may cause
-		 * clients to fail to detect changes and invalidate cache.
-		 *
-		 * z_seq is a per-file 64-bit counter bumped on every change
-		 * and persisted across znode eviction, so it is presented
-		 * directly as a monotonic change cookie. Files that predate
-		 * persistence are seeded from ctime on load so the cookie
-		 * never moves backward across the upgrade.
-		 *
-		 * STATX_ATTR_CHANGE_MONOTONIC is advertised
-		 * to prevent knfsd from generating the change cookie
-		 * based on ctime. C.f. nfsd4_change_attribute in
-		 * fs/nfsd/nfsfh.c.
-		 */
-		stat->change_cookie = atomic_load_64(&zp->z_seq);
-		stat->attributes |= STATX_ATTR_CHANGE_MONOTONIC;
-		stat->result_mask |= STATX_CHANGE_COOKIE;
-	}
-#endif
 
 #ifdef STATX_DIOALIGN
 	if (request_mask & STATX_DIOALIGN) {
@@ -621,6 +599,12 @@ ZPL_IDMAP_IOP_DEFINE(int, zpl_symlink, 3,
 		} else {
 			d_instantiate(dentry, ZTOI(zp));
 		}
+	} else {
+		/*
+		 * The entry may exist despite the error, e.g. after a
+		 * failed zil_commit().
+		 */
+		d_drop(dentry);
 	}
 
 	spl_fstrans_unmark(cookie);
@@ -710,6 +694,7 @@ zpl_link(struct dentry *old_dentry, struct inode *dir, struct dentry *dentry)
 	error = -zfs_link(ITOZ(dir), ITOZ(ip), dname(dentry), cr, 0);
 	if (error) {
 		iput(ip);
+		d_drop(dentry);
 		goto out;
 	}
 

@@ -1,24 +1,14 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -36,32 +26,45 @@
 # 2. Start initializing, offline, export, import, online and verify that
 #    initializing state is preserved / initializing behaves as expected
 #    at each step.
+# 3. Repeat for other VDEV types.
 #
 
 DISK1="$(echo $DISKS | cut -d' ' -f1)"
 DISK2="$(echo $DISKS | cut -d' ' -f2)"
+DISK3="$(echo $DISKS | cut -d' ' -f3)"
 
-log_must zpool create -f $TESTPOOL mirror $DISK1 $DISK2
+for type in "mirror" "anymirror1"; do
 
-log_must zpool initialize $TESTPOOL $DISK1
-log_must zpool offline $TESTPOOL $DISK1
-progress="$(initialize_progress $TESTPOOL $DISK1)"
-[[ -z "$progress" ]] && log_fail "Initializing did not start"
-log_mustnot eval "initialize_prog_line $TESTPOOL $DISK1 | grep suspended"
+	if [[ "$type" =~ "anymirror" ]]; then
+		export disks="$DISK1 $DISK2 $DISK3"
+	else
+		export disks="$DISK1 $DISK2"
+	fi
+	log_must zpool create -f $TESTPOOL $type $disks
 
-log_must zpool export $TESTPOOL
-log_must zpool import $TESTPOOL
+	log_must zpool initialize $TESTPOOL $DISK1
+	log_must zpool offline $TESTPOOL $DISK1
+	progress="$(initialize_progress $TESTPOOL $DISK1)"
+	[[ -z "$progress" ]] && log_fail "Initializing did not start"
+	log_mustnot eval "initialize_prog_line $TESTPOOL $DISK1 | grep suspended"
 
-new_progress="$(initialize_progress $TESTPOOL $DISK1)"
-[[ -z "$new_progress" ]] && log_fail "Initializing did not start after import"
-[[ "$new_progress" -ge "$progress" ]] || \
-    log_fail "Initializing lost progress after import"
-log_mustnot eval "initialize_prog_line $TESTPOOL $DISK1 | grep suspended"
+	log_must zpool export $TESTPOOL
+	log_must zpool import $TESTPOOL
 
-log_must zpool online $TESTPOOL $DISK1
-new_progress="$(initialize_progress $TESTPOOL $DISK1)"
-[[ "$new_progress" -ge "$progress" ]] || \
-    log_fail "Initializing lost progress after online"
+	new_progress="$(initialize_progress $TESTPOOL $DISK1)"
+	[[ -z "$new_progress" ]] && log_fail "Initializing did not start after import"
+	[[ "$new_progress" -ge "$progress" ]] || \
+	    log_fail "Initializing lost progress after import"
+	log_mustnot eval "initialize_prog_line $TESTPOOL $DISK1 | grep suspended"
+
+	log_must zpool online $TESTPOOL $DISK1
+	new_progress="$(initialize_progress $TESTPOOL $DISK1)"
+	[[ "$new_progress" -ge "$progress" ]] || \
+	    log_fail "Initializing lost progress after online"
+
+	poolexists $TESTPOOL && destroy_pool $TESTPOOL
+
+done
 
 log_pass "Initializing behaves as expected at each step of:" \
     "initialize + offline + export + import + online"

@@ -1,24 +1,14 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -33,14 +23,13 @@
 # Ensure that dbufs move from mru to mfu as expected.
 #
 # STRATEGY:
-# 1. Set dbuf cache size to a small size (10M for this test)
-# 2. Generate a file with random data (small enough to fit in cache)
-# 3. zpool sync to remove dbufs from anon list in ARC
-# 4. Obtain the object ID using linux stat command
-# 5. Ensure that all dbufs are on the mru list in the ARC
-# 6. Generate another random file large enough to flush dbuf cache
-# 7. cat the first generated file
-# 8. Ensure that at least some dbufs moved to the mfu list in the ARC
+# 1. Generate a file with random data (small enough to fit in cache)
+# 2. zpool sync to remove dbufs from anon list in ARC
+# 3. Obtain the object ID using linux stat command
+# 4. Ensure that all dbufs are on the mru list in the ARC
+# 5. Wait for the mru buffers to age past ARC_MINTIME
+# 6. cat the first generated file
+# 7. Ensure that at least some dbufs moved to the mfu list in the ARC
 #
 
 DBUFS_FILE=$(mktemp -t dbufs.out.XXXXXX)
@@ -70,6 +59,7 @@ log_note "dbuf count is $dbuf, mru count is $mru, mfu count is $mfu"
 verify_ne "0" "$mru" "mru count"
 verify_eq "0" "$mfu" "mfu count"
 
+log_must sleep 1
 log_must eval "cat $TESTDIR/file > /dev/null"
 log_must eval "kstat dbufs > $DBUFS_FILE"
 dbuf=$(dbufstat -bxn -i "$DBUFS_FILE" -F "object=$objid" | wc -l)

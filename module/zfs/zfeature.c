@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -484,6 +474,15 @@ spa_feature_decr(spa_t *spa, spa_feature_t fid, dmu_tx_t *tx)
 	feature_do_action(spa, fid, FEATURE_ACTION_DECR, tx);
 }
 
+/*
+ * spa_feature_is_enabled() and spa_feature_is_active() answer from the
+ * in-core refcount cache, which spa_ld_check_features() fills in while a
+ * pool is being imported.  Until then every feature reads as disabled, so
+ * code that can run earlier in the import, such as reads of the MOS, can't
+ * rely on them.  An active ZFEATURE_FLAG_MOS feature is also listed in the
+ * label's features_for_read, which is available from the start of the
+ * import; spa_dynamic_gang_header() checks spa_label_features for that.
+ */
 boolean_t
 spa_feature_is_enabled(spa_t *spa, spa_feature_t fid)
 {

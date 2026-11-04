@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -67,7 +57,6 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <libintl.h>
 #include <libnvpair.h>
 #include <libzutil.h>
 #include <limits.h>
@@ -286,8 +275,8 @@ check_slice(const char *path, blkid_cache cache, int force, boolean_t isspare)
 			err = 0;
 		} else {
 			err = -1;
-			vdev_error(gettext("%s contains a filesystem of "
-			    "type '%s'\n"), path, value);
+			vdev_error("%s contains a filesystem of "
+			    "type '%s'\n", path, value);
 		}
 	}
 
@@ -327,8 +316,8 @@ check_disk(const char *path, blkid_cache cache, int force,
 
 	if ((fd = open(path, flags)) < 0) {
 		char *value = blkid_get_tag_value(cache, "TYPE", path);
-		(void) fprintf(stderr, gettext("%s is in use and contains "
-		    "a %s filesystem.\n"), path, value ? value : "unknown");
+		(void) fprintf(stderr, "%s is in use and contains "
+		    "a %s filesystem.\n", path, value ? value : "unknown");
 		free(value);
 		return (-1);
 	}
@@ -356,8 +345,8 @@ check_disk(const char *path, blkid_cache cache, int force,
 			/* Partitions will now be created using the backup */
 			return (0);
 		} else {
-			vdev_error(gettext("%s contains a corrupt primary "
-			    "EFI label.\n"), path);
+			vdev_error("%s contains a corrupt primary "
+			    "EFI label.\n", path);
 			return (-1);
 		}
 	}
@@ -396,8 +385,8 @@ check_device(const char *path, boolean_t force,
 
 	error = blkid_get_cache(&cache, NULL);
 	if (error != 0) {
-		(void) fprintf(stderr, gettext("unable to access the blkid "
-		    "cache.\n"));
+		(void) fprintf(stderr, "unable to access the blkid "
+		    "cache.\n");
 		return (-1);
 	}
 

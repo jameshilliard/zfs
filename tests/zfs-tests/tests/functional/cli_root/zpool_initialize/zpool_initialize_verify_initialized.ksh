@@ -1,24 +1,14 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -59,30 +49,37 @@ log_must set_tunable64 INITIALIZE_VALUE $(printf %llu 0x$PATTERN)
 
 log_must mkdir "$TESTDIR"
 log_must truncate -s $MINVDEVSIZE "$SMALLFILE"
-log_must zpool create $TESTPOOL "$SMALLFILE"
-log_must zpool initialize -w $TESTPOOL
-log_must zpool export $TESTPOOL
 
-metaslabs=0
-bs=512
-zdb -p $TESTDIR -Pme $TESTPOOL | awk '/metaslab[ ]+[0-9]+/ { print $4, $8 }' |
-while read -r offset size; do
-	log_note "offset: '$offset'"
-	log_note "size: '$size'"
+for type in "" "anymirror0"; do
 
-	metaslabs=$((metaslabs + 1))
-	offset=$(((4 * 1024 * 1024) + 16#$offset))
-	log_note "vdev file offset: '$offset'"
+	log_must zpool create $TESTPOOL $type "$SMALLFILE"
+	log_must zpool initialize -w $TESTPOOL
+	log_must zpool export $TESTPOOL
 
-	# Note we use '-t x4' instead of '-t x8' here because x8 is not
-	# a supported format on FreeBSD.
-	dd if=$SMALLFILE skip=$((offset / bs)) count=$((size / bs)) bs=$bs |
-	    od -t x4 -Ad | grep -qE "deadbeef +deadbeef +deadbeef +deadbeef" ||
-	    log_fail "Pattern not found in metaslab free space"
+	metaslabs=0
+	bs=512
+	zdb -p $TESTDIR -Pme $TESTPOOL | awk '/metaslab[ ]+[0-9]+/ { print $4, $8 }' |
+	while read -r offset size; do
+		log_note "offset: '$offset'"
+		log_note "size: '$size'"
+
+		metaslabs=$((metaslabs + 1))
+		offset=$(((4 * 1024 * 1024) + 16#$offset))
+		log_note "vdev file offset: '$offset'"
+
+		# Note we use '-t x4' instead of '-t x8' here because x8 is not
+		# a supported format on FreeBSD.
+		dd if=$SMALLFILE skip=$((offset / bs)) count=$((size / bs)) bs=$bs |
+		    od -t x4 -Ad | grep -qE "deadbeef +deadbeef +deadbeef +deadbeef" ||
+		    log_fail "Pattern not found in metaslab free space"
+	done
+
+	if [[ $metaslabs -eq 0 ]]; then
+		log_fail "Did not find any metaslabs to check"
+	else
+		log_pass "Initializing wrote to each metaslab"
+	fi
+
+	poolexists $TESTPOOL && destroy_pool $TESTPOOL
+
 done
-
-if [[ $metaslabs -eq 0 ]]; then
-	log_fail "Did not find any metaslabs to check"
-else
-	log_pass "Initializing wrote to each metaslab"
-fi

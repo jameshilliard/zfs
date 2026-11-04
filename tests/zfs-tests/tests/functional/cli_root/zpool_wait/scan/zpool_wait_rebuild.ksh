@@ -8,7 +8,7 @@
 #
 # A full copy of the text of the CDDL should have accompanied this
 # source.  A copy of the CDDL is also available via the Internet at
-# http://www.illumos.org/license/CDDL.
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -39,7 +39,16 @@ function cleanup
 	    log_must zpool detach $TESTPOOL $DISK2
 }
 
-typeset -r IN_PROGRESS_CHECK="is_pool_resilvering $TESTPOOL"
+function resilver_in_progress
+{
+	is_pool_resilvering $TESTPOOL && return 0
+	# Status reports completion before the finishing txg has synced.
+	# zpool wait also waits for that txg, including its delayed I/O.
+	sync_pool $TESTPOOL
+	return 1
+}
+
+typeset -r IN_PROGRESS_CHECK="resilver_in_progress"
 typeset pid
 
 log_onexit cleanup

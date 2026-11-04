@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -504,7 +494,7 @@ sa_resize_spill(sa_handle_t *hdl, uint32_t size, dmu_tx_t *tx)
 		blocksize = P2ROUNDUP_TYPED(size, SPA_MINBLOCKSIZE, uint32_t);
 	}
 
-	error = dbuf_spill_set_blksz(hdl->sa_spill, blocksize, tx);
+	error = dbuf_spill_set_blksz(hdl->sa_spill, blocksize, B_TRUE, tx);
 	ASSERT0(error);
 	return (error);
 }
@@ -2263,7 +2253,6 @@ sa_handle_unlock(sa_handle_t *hdl)
 	mutex_exit(&hdl->sa_lock);
 }
 
-#ifdef _KERNEL
 EXPORT_SYMBOL(sa_handle_get);
 EXPORT_SYMBOL(sa_handle_get_from_db);
 EXPORT_SYMBOL(sa_handle_destroy);
@@ -2296,4 +2285,3 @@ EXPORT_SYMBOL(sa_handle_lock);
 EXPORT_SYMBOL(sa_handle_unlock);
 EXPORT_SYMBOL(sa_lookup_uio);
 EXPORT_SYMBOL(sa_add_projid);
-#endif /* _KERNEL */

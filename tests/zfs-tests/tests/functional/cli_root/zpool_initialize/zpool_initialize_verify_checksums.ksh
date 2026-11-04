@@ -1,24 +1,14 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -37,24 +27,31 @@
 # 3. Start initializing and verify that initializing is active.
 # 4. Write more data to the pool.
 # 5. Run zdb to validate checksums.
+# 6. Repeat for other VDEVs.
 #
 
 DISK1=${DISKS%% *}
 
-log_must zpool create -f $TESTPOOL $DISK1
-log_must dd if=/dev/urandom of=/$TESTPOOL/file1 bs=1M count=30
-sync_all_pools
+for type in "" "anymirror0"; do
 
-log_must zpool initialize $TESTPOOL
+	log_must zpool create -f $TESTPOOL $type $DISK1
+	log_must dd if=/dev/urandom of=/$TESTPOOL/file1 bs=1M count=30
+	sync_all_pools
 
-log_must zdb -cc $TESTPOOL
+	log_must zpool initialize $TESTPOOL
 
-[[ -z "$(initialize_progress $TESTPOOL $DISK1)" ]] && \
-    log_fail "Initializing did not start"
+	log_must zdb -cc $TESTPOOL
 
-log_must dd if=/dev/urandom of=/$TESTPOOL/file2 bs=1M count=30
-sync_all_pools
+	[[ -z "$(initialize_progress $TESTPOOL $DISK1)" ]] && \
+	    log_fail "Initializing did not start"
 
-log_must zdb -cc $TESTPOOL
+	log_must dd if=/dev/urandom of=/$TESTPOOL/file2 bs=1M count=30
+	sync_all_pools
+
+	log_must zdb -cc $TESTPOOL
+
+	poolexists $TESTPOOL && destroy_pool $TESTPOOL
+
+done
 
 log_pass "Initializing does not corrupt existing or new data"

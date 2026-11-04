@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2006 Pawel Jakub Dawidek <pjd@FreeBSD.org>
@@ -32,6 +22,7 @@
 #include <sys/bio.h>
 #include <sys/buf.h>
 #include <sys/file.h>
+#include <sys/tsd.h>
 #include <sys/spa.h>
 #include <sys/spa_impl.h>
 #include <sys/vdev_impl.h>
@@ -803,18 +794,13 @@ vdev_geom_open_by_path(vdev_t *vd, int check_guid)
 
 static int
 vdev_geom_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
-    uint64_t *logical_ashift, uint64_t *physical_ashift)
+    uint64_t *logical_ashift, uint64_t *physical_ashift, cred_t *cr)
 {
+	(void) cr;
 	struct g_provider *pp;
 	struct g_consumer *cp;
 	int error, has_trim;
 	uint16_t rate;
-
-	/*
-	 * Set the TLS to indicate downstack that we
-	 * should not access zvols
-	 */
-	VERIFY0(tsd_set(zfs_geom_probe_vdev_key, vd));
 
 	/*
 	 * We must have a pathname, and it must be absolute.
@@ -832,6 +818,13 @@ vdev_geom_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 		ASSERT(vd->vdev_reopening);
 		goto skip_open;
 	}
+
+	/*
+	 * Set the TLS to indicate downstack that we
+	 * should not access zvols
+	 */
+	VERIFY0(tsd_set(zfs_geom_probe_vdev_key, vd));
+
 
 	DROP_GIANT();
 	g_topology_lock();
@@ -1291,6 +1284,7 @@ vdev_ops_t vdev_disk_ops = {
 	.vdev_op_psize_to_asize = vdev_default_asize,
 	.vdev_op_asize_to_psize = vdev_default_psize,
 	.vdev_op_min_asize = vdev_default_min_asize,
+	.vdev_op_min_attach_size = vdev_default_min_attach_size,
 	.vdev_op_min_alloc = NULL,
 	.vdev_op_io_start = vdev_geom_io_start,
 	.vdev_op_io_done = vdev_geom_io_done,

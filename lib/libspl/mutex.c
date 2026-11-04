@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -43,7 +33,7 @@ mutex_init(kmutex_t *mp, char *name, int type, void *cookie)
 {
 	(void) name, (void) type, (void) cookie;
 	VERIFY0(pthread_mutex_init(&mp->m_lock, NULL));
-	memset(&mp->m_owner, 0, sizeof (pthread_t));
+	mp->m_owner = NULL;
 }
 
 void
@@ -56,7 +46,7 @@ void
 mutex_enter(kmutex_t *mp)
 {
 	VERIFY0(pthread_mutex_lock(&mp->m_lock));
-	mp->m_owner = pthread_self();
+	mp->m_owner = curthread;
 }
 
 int
@@ -64,7 +54,7 @@ mutex_enter_check_return(kmutex_t *mp)
 {
 	int error = pthread_mutex_lock(&mp->m_lock);
 	if (error == 0)
-		mp->m_owner = pthread_self();
+		mp->m_owner = curthread;
 	return (error);
 }
 
@@ -73,7 +63,7 @@ mutex_tryenter(kmutex_t *mp)
 {
 	int error = pthread_mutex_trylock(&mp->m_lock);
 	if (error == 0) {
-		mp->m_owner = pthread_self();
+		mp->m_owner = curthread;
 		return (1);
 	} else {
 		VERIFY3S(error, ==, EBUSY);
@@ -84,6 +74,6 @@ mutex_tryenter(kmutex_t *mp)
 void
 mutex_exit(kmutex_t *mp)
 {
-	memset(&mp->m_owner, 0, sizeof (pthread_t));
+	mp->m_owner = NULL;
 	VERIFY0(pthread_mutex_unlock(&mp->m_lock));
 }

@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -638,6 +628,7 @@ dmu_objset_open_impl(spa_t *spa, dsl_dataset_t *ds, blkptr_t *bp,
 			}
 		}
 		if (err != 0) {
+			dsl_prop_unregister_all(ds, os);
 			arc_buf_destroy(os->os_phys_buf, &os->os_phys_buf);
 			kmem_free(os, sizeof (objset_t));
 			return (err);
@@ -1136,11 +1127,10 @@ dmu_objset_create_impl_dnstats(spa_t *spa, dsl_dataset_t *ds, blkptr_t *bp,
 	os->os_phys->os_type = type;
 
 	/*
-	 * Enable user accounting if it is enabled and this is not an
-	 * encrypted receive.
+	 * Enable user accounting if it is enabled and this is not a raw
+	 * receive.
 	 */
-	if (dmu_objset_userused_enabled(os) &&
-	    (!os->os_encrypted || !dmu_objset_is_receiving(os))) {
+	if (dmu_objset_userused_enabled(os) && !os->os_raw_receive) {
 		os->os_phys->os_flags |= OBJSET_FLAG_USERACCOUNTING_COMPLETE;
 		if (dmu_objset_userobjused_enabled(os)) {
 			ASSERT3P(ds, !=, NULL);
@@ -1410,9 +1400,14 @@ dmu_objset_upgrade_task_cb(void *data)
 		os->os_upgrade_status = status;
 	}
 	os->os_upgrade_exit = B_TRUE;
+	/*
+	 * dmu_objset_upgrade_stop() does not wait for a task whose id is
+	 * cleared, and the dataset can be evicted as soon as it returns,
+	 * so release the hold first.
+	 */
+	dsl_dataset_long_rele(dmu_objset_ds(os), upgrade_tag);
 	os->os_upgrade_id = 0;
 	mutex_exit(&os->os_upgrade_lock);
-	dsl_dataset_long_rele(dmu_objset_ds(os), upgrade_tag);
 }
 
 static void
@@ -1456,7 +1451,8 @@ dmu_objset_upgrade_stop(objset_t *os)
 		    B_TRUE)) == 0) {
 			dsl_dataset_long_rele(dmu_objset_ds(os), upgrade_tag);
 		}
-		txg_wait_synced(os->os_spa->spa_dsl_pool, 0);
+		dsl_pool_t *dp = os->os_spa->spa_dsl_pool;
+		(void) txg_wait_synced_flags(dp, 0, TXG_WAIT_SUSPEND);
 	} else {
 		mutex_exit(&os->os_upgrade_lock);
 	}
@@ -2100,7 +2096,7 @@ dmu_objset_do_userquota_updates_prep(objset_t *os, dmu_tx_t *tx)
 	 * for the duration of claiming and this txg should only be
 	 * used for recovery.
 	 */
-	if (os->os_encrypted && dmu_objset_is_receiving(os))
+	if (os->os_raw_receive)
 		return (B_FALSE);
 
 	if (tx->tx_txg <= os->os_spa->spa_claim_max_txg)
@@ -2205,20 +2201,25 @@ dmu_objset_userquota_get_ids(dnode_t *dn, boolean_t before, dmu_tx_t *tx)
 	 * receives cannot update the user accounting info because the
 	 * user ids and the sizes are encrypted. To guarantee that we
 	 * never end up with bad user accounting, we simply disable it
-	 * during raw receives. We also disable this for normal receives
-	 * so that an incremental raw receive may be done on top of an
-	 * existing non-raw receive.
+	 * during raw receives, and receive_reset_accounting() discards
+	 * any existing accounting.
 	 */
-	if (os->os_encrypted && dmu_objset_is_receiving(os))
+	if (os->os_raw_receive)
 		return;
 
 	if (before && (flags & (DN_ID_CHKED_BONUS|DN_ID_OLD_EXIST|
 	    DN_ID_CHKED_SPILL)))
 		return;
 
-	if (before && dn->dn_bonuslen != 0)
+	if (before && dn->dn_bonuslen != 0) {
+		if (dnode_decrypt_bonus(dn) != 0) {
+			mutex_enter(&dn->dn_mtx);
+			dn->dn_id_flags |= DN_ID_CHKED_BONUS;
+			mutex_exit(&dn->dn_mtx);
+			return;
+		}
 		data = DN_BONUS(dn->dn_phys);
-	else if (!before && dn->dn_bonuslen != 0) {
+	} else if (!before && dn->dn_bonuslen != 0) {
 		if (dn->dn_bonus) {
 			db = dn->dn_bonus;
 			mutex_enter(&db->db_mtx);
@@ -2387,7 +2388,9 @@ dmu_objset_userspace_upgrade_cb(objset_t *os)
 		return (err);
 
 	os->os_flags |= OBJSET_FLAG_USERACCOUNTING_COMPLETE;
-	txg_wait_synced(dmu_objset_pool(os), 0);
+	if (txg_wait_synced_flags(dmu_objset_pool(os), 0,
+	    TXG_WAIT_SUSPEND) != 0)
+		return (SET_ERROR(EAGAIN));
 	return (0);
 }
 
@@ -2430,7 +2433,9 @@ dmu_objset_id_quota_upgrade_cb(objset_t *os)
 	if (dmu_objset_projectquota_enabled(os))
 		os->os_flags |= OBJSET_FLAG_PROJECTQUOTA_COMPLETE;
 
-	txg_wait_synced(dmu_objset_pool(os), 0);
+	if (txg_wait_synced_flags(dmu_objset_pool(os), 0,
+	    TXG_WAIT_SUSPEND) != 0)
+		return (SET_ERROR(EAGAIN));
 	return (0);
 }
 
@@ -2525,43 +2530,8 @@ int
 dmu_snapshot_list_next(objset_t *os, int namelen, char *name,
     uint64_t *idp, uint64_t *offp, boolean_t *case_conflict)
 {
-	dsl_dataset_t *ds = os->os_dsl_dataset;
-	zap_cursor_t cursor;
-	zap_attribute_t *attr;
-
-	ASSERT(dsl_pool_config_held(dmu_objset_pool(os)));
-
-	if (dsl_dataset_phys(ds)->ds_snapnames_zapobj == 0)
-		return (SET_ERROR(ENOENT));
-
-	attr = zap_attribute_alloc();
-	zap_cursor_init_serialized(&cursor,
-	    ds->ds_dir->dd_pool->dp_meta_objset,
-	    dsl_dataset_phys(ds)->ds_snapnames_zapobj, *offp);
-
-	if (zap_cursor_retrieve(&cursor, attr) != 0) {
-		zap_cursor_fini(&cursor);
-		zap_attribute_free(attr);
-		return (SET_ERROR(ENOENT));
-	}
-
-	if (strlen(attr->za_name) + 1 > namelen) {
-		zap_cursor_fini(&cursor);
-		zap_attribute_free(attr);
-		return (SET_ERROR(ENAMETOOLONG));
-	}
-
-	(void) strlcpy(name, attr->za_name, namelen);
-	if (idp)
-		*idp = attr->za_first_integer;
-	if (case_conflict)
-		*case_conflict = attr->za_normalization_conflict;
-	zap_cursor_advance(&cursor);
-	*offp = zap_cursor_serialize(&cursor);
-	zap_cursor_fini(&cursor);
-	zap_attribute_free(attr);
-
-	return (0);
+	return (dsl_dataset_snapshot_list_next(os->os_dsl_dataset, namelen,
+	    name, idp, offp, case_conflict));
 }
 
 int
@@ -3041,9 +3011,10 @@ dmu_objset_willuse_space(objset_t *os, int64_t space, dmu_tx_t *tx)
 
 	if (ds != NULL) {
 		dsl_dir_willuse_space(ds->ds_dir, aspace, tx);
+		dsl_pool_dirty_space(dmu_tx_pool(tx), space, tx);
+	} else {
+		dsl_pool_dirty_mos_space(dmu_tx_pool(tx), space, tx);
 	}
-
-	dsl_pool_dirty_space(dmu_tx_pool(tx), space, tx);
 }
 
 /*
@@ -3064,7 +3035,6 @@ dmu_objset_block_is_shared(objset_t *os, const blkptr_t *bp)
 	return (BP_GET_BIRTH(bp) <= dsl_dataset_phys(ds)->ds_prev_snap_txg);
 }
 
-#if defined(_KERNEL)
 EXPORT_SYMBOL(dmu_objset_zil);
 EXPORT_SYMBOL(dmu_objset_pool);
 EXPORT_SYMBOL(dmu_objset_ds);
@@ -3109,4 +3079,3 @@ EXPORT_SYMBOL(dmu_objset_projectquota_present);
 EXPORT_SYMBOL(dmu_objset_projectquota_upgradable);
 EXPORT_SYMBOL(dmu_objset_id_quota_upgrade);
 EXPORT_SYMBOL(dmu_objset_block_is_shared);
-#endif

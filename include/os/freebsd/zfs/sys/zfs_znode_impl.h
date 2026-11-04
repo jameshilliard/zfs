@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -120,6 +110,7 @@ typedef struct zfs_soft_state {
 #define	zn_has_cached_data(zp, start, end) \
     vn_has_cached_data(ZTOV(zp))
 #define	zn_flush_cached_data(zp, sync)	vn_flush_cached_data(ZTOV(zp), sync)
+#define	zn_zero_eof_page(zp, lr, end)	zfs_zero_eof_page(zp, lr, end)
 #define	zn_rlimit_fsize(size)		zfs_rlimit_fsize(size)
 #define	zn_rlimit_fsize_uio(zp, uio) \
     vn_rlimit_fsize(ZTOV(zp), GET_UIO_STRUCT(uio), zfs_uio_td(uio))
@@ -178,6 +169,8 @@ extern void	zfs_tstamp_update_setup_ext(struct znode *,
     uint_t, uint64_t [2], uint64_t [2], boolean_t have_tx);
 extern boolean_t zfs_relatime_need_update(const struct znode *);
 extern void zfs_znode_free(struct znode *);
+extern void zfs_zero_eof_page(struct znode *, struct zfs_locked_range *,
+    uint64_t);
 
 extern zil_replay_func_t *const zfs_replay_vector[TX_MAX_TYPE];
 

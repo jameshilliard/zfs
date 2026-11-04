@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -46,7 +36,6 @@
  */
 
 #include <sys/zfs_context.h>
-#include <sys/inttypes.h>
 #include <sys/cred.h>
 #include <sys/fs/zfs.h>
 #include <sys/zio_compress.h>
@@ -830,6 +819,7 @@ void dmu_buf_will_rewrite(dmu_buf_t *db, dmu_tx_t *tx);
 boolean_t dmu_buf_is_dirty(dmu_buf_t *db, dmu_tx_t *tx);
 void dmu_buf_set_crypt_params(dmu_buf_t *db_fake, boolean_t byteorder,
     const uint8_t *salt, const uint8_t *iv, const uint8_t *mac, dmu_tx_t *tx);
+int dmu_buf_will_rewrite_raw(dmu_buf_t *db_fake, dmu_tx_t *tx);
 
 /*
  * You must create a transaction, then hold the objects which you will
@@ -928,8 +918,6 @@ void dmu_write(objset_t *os, uint64_t object, uint64_t offset, uint64_t size,
     const void *buf, dmu_tx_t *tx, dmu_flags_t flags);
 int dmu_write_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
     const void *buf, dmu_tx_t *tx, dmu_flags_t flags);
-void dmu_prealloc(objset_t *os, uint64_t object, uint64_t offset, uint64_t size,
-    dmu_tx_t *tx);
 #ifdef _KERNEL
 int dmu_read_uio(objset_t *os, uint64_t object, zfs_uio_t *uio, uint64_t size,
     dmu_flags_t flags);
@@ -1156,6 +1144,8 @@ int dmu_sync(struct zio *zio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd);
  */
 int dmu_offset_next(objset_t *os, uint64_t object, boolean_t hole,
     uint64_t *off);
+int dmu_offset_next_nowait(objset_t *os, uint64_t object,
+    boolean_t hole, uint64_t *off);
 
 int dmu_read_l0_bps(objset_t *os, uint64_t object, uint64_t offset,
     uint64_t length, struct blkptr *bps, size_t *nbpsp);

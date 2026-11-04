@@ -1,23 +1,13 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -38,6 +28,9 @@
 #	6. Repeat with ganging forced, so the pruned blocks are gang blocks:
 #	   freeing them must release the gang members too, not just the
 #	   headers
+#	7. Write a block with copies=1, write it again with copies=2, so its
+#	   entry gains a copy that the first block does not refer to, and
+#	   remove the second file: ddtprune must not leak that copy
 #
 
 . $STF_SUITE/include/libtest.shlib
@@ -56,11 +49,13 @@ log_must save_tunable DEDUP_LOG_FLUSH_ENTRIES_MIN
 log_must set_tunable32 DEDUP_LOG_FLUSH_ENTRIES_MIN 100000
 log_must save_tunable METASLAB_FORCE_GANGING
 log_must save_tunable METASLAB_FORCE_GANGING_PCT
+typeset blockfile=$TEST_BASE_DIR/dedup_prune_leak.blk
 function cleanup
 {
 	if poolexists $TESTPOOL ; then
 		destroy_pool $TESTPOOL
 	fi
+	rm -f $blockfile
 	log_must restore_tunable DEDUP_LOG_TXG_MAX
 	log_must restore_tunable DEDUP_LOG_FLUSH_ENTRIES_MIN
 	log_must restore_tunable METASLAB_FORCE_GANGING
@@ -136,6 +131,38 @@ echo "$zdb_out"
 if (( rc != 0 )) || \
     echo "$zdb_out" | grep -Eq "leaked space|DOUBLE ALLOC|DOUBLE FREE"; then
 	log_fail "DDT pruning causes space leak on gang blocks"
+fi
+
+log_must zfs create -o dedup=on -o copies=1 -o compression=off \
+    $TESTPOOL/$TESTFS1
+mountpoint=$(get_prop mountpoint $TESTPOOL/$TESTFS1)
+log_must dd if=/dev/urandom of=$blockfile bs=128k count=1
+log_must cp $blockfile $mountpoint/f3
+sync_pool $TESTPOOL
+log_must zfs set copies=2 $TESTPOOL/$TESTFS1
+log_must cp $blockfile $mountpoint/f4
+sync_pool $TESTPOOL
+log_must rm $mountpoint/f4
+for i in $(seq 5); do
+	sync_pool $TESTPOOL
+done
+sleep 1
+log_must zpool ddtprune -p 100 $TESTPOOL
+sync_pool $TESTPOOL
+zdb_out=$(zdb -bcc $TESTPOOL 2>&1)
+rc=$?
+echo "$zdb_out"
+if (( rc != 0 )) || echo "$zdb_out" | grep -q "leaked space"; then
+	log_fail "DDT pruning leaks the copy an extended entry gained"
+fi
+
+log_must rm $mountpoint/f3
+sync_pool $TESTPOOL
+zdb_out=$(zdb -bcc $TESTPOOL 2>&1)
+rc=$?
+echo "$zdb_out"
+if (( rc != 0 )) || echo "$zdb_out" | grep -q "leaked space"; then
+	log_fail "Freeing the block of a kept extended entry leaks space"
 fi
 
 log_pass "DDT pruning does not cause space leak"

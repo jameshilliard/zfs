@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -486,6 +476,9 @@ typedef enum {
 	VDEV_PROP_FGROUP,
 	VDEV_PROP_ALLOC_BIAS,
 	VDEV_PROP_ROTATIONAL,
+	VDEV_PROP_ANYRAID_CAP_TILES,
+	VDEV_PROP_ANYRAID_NUM_TILES,
+	VDEV_PROP_ANYRAID_TILE_SIZE,
 	VDEV_NUM_PROPS
 } vdev_prop_t;
 
@@ -836,6 +829,7 @@ typedef enum {
 
 typedef struct zpool_load_policy {
 	uint32_t	zlp_rewind;	/* rewind policy requested */
+	boolean_t	zlp_relaxmeta;	/* tolerate non-critical meta-data */
 	uint64_t	zlp_maxmeta;	/* max acceptable meta-data errors */
 	uint64_t	zlp_maxdata;	/* max acceptable data errors */
 	uint64_t	zlp_txg;	/* specific txg to load */
@@ -979,6 +973,7 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_CREATE_INFO	"create_info"	/* not stored on disk */
 #define	ZPOOL_CREATE_INFO_VDEV		"create_err_vdev"
 #define	ZPOOL_CREATE_INFO_POOL		"create_err_pool"
+#define	ZPOOL_CREATE_INFO_SIZE		"create_err_size"
 #define	ZPOOL_CONFIG_REWIND_INFO	"rewind_info"	/* not stored on disk */
 #define	ZPOOL_CONFIG_UNSUP_FEAT		"unsup_feat"	/* not stored on disk */
 #define	ZPOOL_CONFIG_ENABLED_FEAT	"enabled_feat"	/* not stored on disk */
@@ -1022,10 +1017,12 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_LOAD_POLICY		"load-policy"
 #define	ZPOOL_LOAD_REWIND_POLICY	"load-rewind-policy"
 #define	ZPOOL_LOAD_REQUEST_TXG		"load-request-txg"
+#define	ZPOOL_LOAD_RELAX_META		"load-relax-meta"
 #define	ZPOOL_LOAD_META_THRESH		"load-meta-thresh"
 #define	ZPOOL_LOAD_DATA_THRESH		"load-data-thresh"
 
 /* Rewind data discovered */
+#define	ZPOOL_CONFIG_LOAD_TXG		"rewind_txg"
 #define	ZPOOL_CONFIG_LOAD_TIME		"rewind_txg_ts"
 #define	ZPOOL_CONFIG_LOAD_META_ERRORS	"verify_meta_errors"
 #define	ZPOOL_CONFIG_LOAD_DATA_ERRORS	"verify_data_errors"
@@ -1037,10 +1034,14 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_DRAID_NGROUPS	"draid_ngroups"
 #define	ZPOOL_CONFIG_DRAID_NCHILDREN	"draid_nchildren"
 
+/* ANYRAID configuration */
+#define	ZPOOL_CONFIG_ANYRAID_PARITY_TYPE	"anyraid_parity_type"
+
 #define	VDEV_TYPE_ROOT			"root"
 #define	VDEV_TYPE_MIRROR		"mirror"
 #define	VDEV_TYPE_REPLACING		"replacing"
 #define	VDEV_TYPE_RAIDZ			"raidz"
+#define	VDEV_TYPE_ANYMIRROR		"anymirror"
 #define	VDEV_TYPE_DRAID			"draid"
 #define	VDEV_TYPE_DRAID_SPARE		"dspare"
 #define	VDEV_TYPE_DISK			"disk"
@@ -1784,6 +1785,7 @@ typedef struct zfs_rewrite_args {
 #define	ZFS_REWRITE_PHYSICAL		0x1 /* Preserve logical birth time. */
 #define	ZFS_REWRITE_SKIP_SNAPSHOT	0x2 /* Skip snapshot-shared blocks. */
 #define	ZFS_REWRITE_SKIP_BRT		0x4 /* Skip BRT-cloned blocks. */
+#define	ZFS_REWRITE_SKIP_CURRENT_ASIZE	0x8 /* Skip blocks of current asize. */
 
 #define	ZFS_IOC_REWRITE		_IOW(0x83, 3, zfs_rewrite_args_t)
 
@@ -1830,6 +1832,8 @@ typedef enum {
 	ZFS_ERR_STREAM_LARGE_MICROZAP,
 	ZFS_ERR_TOO_MANY_SITOUTS,
 	ZFS_ERR_NO_USER_NS_SUPPORT,
+	ZFS_ERR_CRYPTO_KEY_MISMATCH,
+	ZFS_ERR_RAIDZ_EXPAND_TOO_WIDE,
 } zfs_errno_t;
 
 /*
@@ -1882,6 +1886,24 @@ typedef enum {
 #define	ZPOOL_ERR_LIST		"error list"
 #define	ZPOOL_ERR_DATASET	"dataset"
 #define	ZPOOL_ERR_OBJECT	"object"
+#define	ZPOOL_ERR_LEVEL		"level"
+#define	ZPOOL_ERR_BLKID		"blkid" /* unused */
+
+/* Additional nvpairs from zpool_get_errlog() nvlist */
+#define	ZPOOL_ERR_BLOCK_SIZE	"block_size"
+#define	ZPOOL_ERR_OBJECT_TYPE	"object_type"
+#define	ZPOOL_ERR_RANGES	"ranges"
+#define	ZPOOL_ERR_START_BYTE	"start_byte"
+#define	ZPOOL_ERR_END_BYTE	"end_byte"
+#define	ZPOOL_ERR_NAME		"name"
+
+/*
+ * For the zpool status JSON output, we collect all the error lists and put
+ * them in a separate top level element so they're easier to iterate over.
+ * That way the error lists don't get interspersed with the zpool status
+ * objects.
+ */
+#define	ZPOOL_ERR_JSON		"errlist"
 
 #define	HIS_MAX_RECORD_LEN	(MAXPATHLEN + MAXPATHLEN + 1)
 
@@ -2094,6 +2116,13 @@ typedef enum {
 #define	ZFS_EV_HIST_DSNAME	"history_dsname"
 #define	ZFS_EV_HIST_DSID	"history_dsid"
 #define	ZFS_EV_RESILVER_TYPE	"resilver_type"
+#define	ZFS_EV_METASLAB_ID	"metaslab_id"
+#define	ZFS_EV_METASLAB_OBJECT	"metaslab_object"
+#define	ZFS_EV_METASLAB_TXG	"metaslab_txg"
+#define	ZFS_EV_METASLAB_ENTRIES	"metaslab_entries"
+#define	ZFS_EV_METASLAB_BYTES	"metaslab_bytes"
+#define	ZFS_EV_METASLAB_OLD_ALLOC	"metaslab_old_alloc"
+#define	ZFS_EV_METASLAB_ALLOC	"metaslab_alloc"
 
 /*
  * We currently support block sizes from 512 bytes to 16MB.

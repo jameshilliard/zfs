@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -223,14 +213,14 @@ typedef enum {
  * because its relatively rarely used.
  */
 typedef struct {
-	/* protects dde_phys, dde_orig_phys and dde_lead_zio during I/O */
+	/* protects dde_phys, dde_rollback_phys and dde_lead_zio during I/O */
 	kmutex_t	dde_io_lock;
 
 	/* copy of data after a repair read, to be rewritten */
 	abd_t		*dde_repair_abd;
 
-	/* original phys contents before update, for error handling */
-	ddt_univ_phys_t	dde_orig_phys;
+	/* rollback point for the outstanding extension chain */
+	ddt_univ_phys_t	dde_rollback_phys;
 
 	/* in-flight update IOs */
 	zio_t		*dde_lead_zio[DDT_PHYS_MAX];
@@ -366,7 +356,8 @@ extern void ddt_bp_create(enum zio_checksum checksum, const ddt_key_t *ddk,
 
 extern void ddt_phys_extend(ddt_univ_phys_t *ddp, ddt_phys_variant_t v,
     const blkptr_t *bp);
-extern void ddt_phys_unextend(ddt_univ_phys_t *cur, ddt_univ_phys_t *orig,
+extern void ddt_phys_unextend(ddt_univ_phys_t *cur,
+    const ddt_univ_phys_t *orig,
     ddt_phys_variant_t v);
 extern void ddt_phys_copy(ddt_univ_phys_t *dst, const ddt_univ_phys_t *src,
     ddt_phys_variant_t v);
@@ -403,6 +394,7 @@ extern uint64_t ddt_get_dedup_used(spa_t *spa);
 extern uint64_t ddt_get_dedup_saved(spa_t *spa);
 extern uint64_t ddt_get_pool_dedup_ratio(spa_t *spa);
 extern int ddt_get_pool_dedup_cached(spa_t *spa, uint64_t *psize);
+extern uint64_t ddt_sync_dirty_est(spa_t *spa);
 
 extern ddt_t *ddt_select(spa_t *spa, const blkptr_t *bp);
 extern void ddt_enter(ddt_t *ddt);

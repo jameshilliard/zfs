@@ -1,24 +1,14 @@
 #!/usr/bin/env perl
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 # Copyright 2016 Nexenta Systems, Inc.
 #
@@ -99,6 +89,9 @@ my $typename = '(int|char|short|long|unsigned|float|double' .
 
 # cast or compound-literal type, e.g. "(foo_t *)"
 my $cast = qr/\($typename(?: \*+)?\)/;
+
+# macros should be uppercase, underscores, or digits
+my $macro = '[A-Z_][A-Z_0-9]*\(';
 
 # mapping of old types to POSIX compatible types
 my %old2posix = (
@@ -402,7 +395,7 @@ line: while (<$filehandle>) {
 
 	# If this looks like a top-level macro invocation, remember it so we
 	# don't mistake it for a function declaration below.
-	if (/^[A-Za-z_][A-Za-z_0-9]*\(/) {
+	if (/^$macro/) {
 		$in_macro_call = 1;
 	}
 
@@ -701,7 +694,7 @@ line: while (<$filehandle>) {
 			err("unary * followed by space");
 		}
 	}
-	if ($check_posix_types && !$in_macro_call) {
+	if ($check_posix_types && !$in_macro_call && !/\bmodule_param\(/) {
 		# try to detect old non-POSIX types.
 		# POSIX requires all non-standard typedefs to end in _t,
 		# but historically these have been used.
@@ -802,7 +795,6 @@ process_indent($)
 
 	# regexps used below; keywords taking (), macros, and continued cases
 	my $special = '(?:(?:\}\s*)?else\s+)?(?:if|for|while|switch)\b';
-	my $macro = '[A-Z_][A-Z_0-9]*\(';
 	my $case = 'case\b[^:]*$';
 
 	# skip over enumerations, array definitions, initializers, etc.

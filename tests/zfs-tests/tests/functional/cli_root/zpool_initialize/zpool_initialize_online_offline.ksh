@@ -1,28 +1,19 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
 # Copyright (c) 2016 by Delphix. All rights reserved.
+# Copyright (c) 2025 by Klara, Inc.
 #
 . $STF_SUITE/include/libtest.shlib
 . $STF_SUITE/tests/functional/cli_root/zpool_initialize/zpool_initialize.kshlib
@@ -39,37 +30,62 @@
 # 5. Verify that initializing resumes and progress does not regress.
 # 6. Suspend initializing.
 # 7. Repeat steps 3-4 and verify that initializing does not resume.
+# 8. Repeat the scenario for other VDEVs
 #
 
 DISK1=${DISKS%% *}
 DISK2="$(echo $DISKS | cut -d' ' -f2)"
+DISK3="$(echo $DISKS | cut -d' ' -f3)"
 
-log_must zpool create -f $TESTPOOL mirror $DISK1 $DISK2
-log_must zpool initialize $TESTPOOL $DISK1
+function cleanup
+{
+	zinject -c all
+	poolexists $TESTPOOL && destroy_pool $TESTPOOL
+}
+log_onexit cleanup
 
-log_must zpool offline $TESTPOOL $DISK1
+for type in "mirror" "anymirror1"; do
 
-progress="$(initialize_progress $TESTPOOL $DISK1)"
-[[ -z "$progress" ]] && log_fail "Initializing did not start"
+	if [[ "$type" == "mirror" ]]; then
+		log_must zpool create -f $TESTPOOL $type $DISK1 $DISK2
+	else
+		log_must zpool create -f $TESTPOOL $type $DISK1 $DISK2 $DISK3
+		log_must file_write -o create -f /$TESTPOOL/f1 -b 1048576 -c 400 -d R
+		log_must zpool sync
+		log_must rm /$TESTPOOL/f1
+		log_must zpool sync
+	fi
+	log_must zinject -D 10:1 -d $DISK1 -T write $TESTPOOL
+	log_must zpool initialize $TESTPOOL $DISK1
 
-log_must zpool online $TESTPOOL $DISK1
+	log_must zpool offline $TESTPOOL $DISK1
 
-new_progress="$(initialize_progress $TESTPOOL $DISK1)"
-[[ -z "$new_progress" ]] && \
-    log_fail "Initializing did not restart after onlining"
-[[ "$progress" -le "$new_progress" ]] || \
-    log_fail "Initializing lost progress after onlining"
-log_mustnot eval "initialize_prog_line $TESTPOOL $DISK1 | grep suspended"
+	progress="$(initialize_progress $TESTPOOL $DISK1)"
+	[[ -z "$progress" ]] && log_fail "Initializing did not start"
 
-log_must zpool initialize -s $TESTPOOL $DISK1
-action_date="$(initialize_prog_line $TESTPOOL $DISK1 | \
-    sed 's/.*ed at \(.*\)).*/\1/g')"
-log_must zpool offline $TESTPOOL $DISK1
-log_must zpool online $TESTPOOL $DISK1
-new_action_date=$(initialize_prog_line $TESTPOOL $DISK1 | \
-    sed 's/.*ed at \(.*\)).*/\1/g')
-[[ "$action_date" != "$new_action_date" ]] && \
-    log_fail "Initializing action date did not persist across offline/online"
-log_must eval "initialize_prog_line $TESTPOOL $DISK1 | grep suspended"
+	log_must zpool online $TESTPOOL $DISK1
+
+	new_progress="$(initialize_progress $TESTPOOL $DISK1)"
+	[[ -z "$new_progress" ]] && \
+	    log_fail "Initializing did not restart after onlining"
+	[[ "$progress" -le "$new_progress" ]] || \
+	    log_fail "Initializing lost progress after onlining"
+	log_mustnot eval "initialize_prog_line $TESTPOOL $DISK1 | grep suspended"
+
+	log_must zpool initialize -s $TESTPOOL $DISK1
+	log_must zinject -c all
+	action_date="$(initialize_prog_line $TESTPOOL $DISK1 | \
+	    sed 's/.*ed at \(.*\)).*/\1/g')"
+	log_must zpool offline $TESTPOOL $DISK1
+	log_must zpool online $TESTPOOL $DISK1
+	new_action_date=$(initialize_prog_line $TESTPOOL $DISK1 | \
+	    sed 's/.*ed at \(.*\)).*/\1/g')
+	[[ "$action_date" != "$new_action_date" ]] && \
+	    log_fail "Initializing action date did not persist across offline/online"
+	log_must eval "initialize_prog_line $TESTPOOL $DISK1 | grep suspended"
+
+	poolexists $TESTPOOL && destroy_pool $TESTPOOL
+
+done
 
 log_pass "Initializing performs as expected across offline/online"

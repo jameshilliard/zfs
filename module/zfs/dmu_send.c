@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -63,9 +53,6 @@
 #include <sys/zvol.h>
 #include <sys/policy.h>
 #include <sys/objlist.h>
-#ifdef _KERNEL
-#include <sys/zfs_vfsops.h>
-#endif
 
 /* Set this tunable to TRUE to replace corrupt data with 0x2f5baddb10c */
 static int zfs_send_corrupt_data = B_FALSE;
@@ -846,6 +833,24 @@ send_do_embed(const blkptr_t *bp, uint64_t featureflags)
 		return (B_FALSE);
 
 	/*
+	 * Spill blocks (DMU_OT_SA) are sent as DRR_SPILL, not
+	 * DRR_WRITE_EMBEDDED.
+	 */
+	if (BP_GET_TYPE(bp) == DMU_OT_SA)
+		return (B_FALSE);
+
+	/*
+	 * Without DMU_BACKUP_FEATURE_LARGE_BLOCKS the object's block size is
+	 * clamped to SPA_OLD_MAXBLOCKSIZE in the DRR_OBJECT record (see
+	 * dump_dnode()), so a larger embedded block cannot be represented on
+	 * the receiving side. Decline it here and let do_dump() split it
+	 * into SPA_OLD_MAXBLOCKSIZE chunks.
+	 */
+	if (BP_GET_LSIZE(bp) > SPA_OLD_MAXBLOCKSIZE &&
+	    !(featureflags & DMU_BACKUP_FEATURE_LARGE_BLOCKS))
+		return (B_FALSE);
+
+	/*
 	 * Compression function must be legacy, or explicitly enabled.
 	 */
 	if ((BP_GET_COMPRESS(bp) >= ZIO_COMPRESS_LEGACY_FUNCTIONS &&
@@ -1210,7 +1215,7 @@ send_traverse_thread(void *arg)
 
 	err = traverse_dataset_resume(st_arg->os->os_dsl_dataset,
 	    st_arg->fromtxg, &st_arg->resume,
-	    st_arg->flags | TRAVERSE_LOGICAL, send_cb, st_arg);
+	    st_arg->flags, send_cb, st_arg);
 
 	if (err != EINTR)
 		st_arg->error_code = err;
@@ -1256,6 +1261,17 @@ send_range_after(const struct send_range *from, const struct send_range *to)
 	if (unlikely(cmp))
 		return (cmp);
 	cmp = TREE_CMP(to->type == OBJECT, from->type == OBJECT);
+	if (unlikely(cmp))
+		return (cmp);
+	/*
+	 * A meta-dnode range and an ordinary object's range express their
+	 * blkids in different units, dnode blocks against that object's data
+	 * blocks, so the blkid comparisons below cannot be applied to them.
+	 * Reaching here means their object ranges overlap; the meta-dnode
+	 * range sorts before the ranges of every object it covers, which is
+	 * the order send_range_start_compare() also establishes.
+	 */
+	cmp = TREE_CMP(to->object == 0, from->object == 0);
 	if (unlikely(cmp))
 		return (cmp);
 	if (from->end_blkid <= to->start_blkid)
@@ -1345,6 +1361,17 @@ send_range_start_compare(struct send_range *r1, struct send_range *r2)
 	if (unlikely(cmp))
 		return (cmp);
 	cmp = TREE_CMP(r2->type == OBJECT, r1->type == OBJECT);
+	if (unlikely(cmp))
+		return (cmp);
+	/*
+	 * A meta-dnode range covering dnode block b has the same objequiv as
+	 * the first block of object b * DNODES_PER_BLOCK, but the two do not
+	 * start at the same place: their blkids count different things.  The
+	 * merge in find_next_range() may only treat ranges as starting
+	 * together when they genuinely share an object and a block, so order
+	 * the meta-dnode range first rather than reporting them equal.
+	 */
+	cmp = TREE_CMP(r2->object == 0, r1->object == 0);
 	if (unlikely(cmp))
 		return (cmp);
 
@@ -1443,6 +1470,7 @@ find_next_range(struct send_range **ranges, bqueue_t **qs, uint64_t *out_mask)
 	for (i = 0; i < NUM_THREADS; i++) {
 		if (i == idx || (bmask & (1 << i)) == 0)
 			continue;
+		ASSERT3U(ranges[i]->object, ==, ranges[idx]->object);
 		ASSERT3U(first_change, >, ranges[i]->start_blkid);
 		ranges[i]->start_blkid = first_change;
 		ASSERT3U(ranges[i]->start_blkid, <=, ranges[i]->end_blkid);
@@ -1650,6 +1678,19 @@ issue_data_read(struct send_reader_thread_arg *srta, struct send_range *range)
 	int arc_err = arc_read(NULL, os->os_spa, bp,
 	    arc_getbuf_func, &srdp->abuf, ZIO_PRIORITY_ASYNC_READ,
 	    zioflags, &aflags, &zb);
+	/*
+	 * The ARC only honors a request for compressed data if the header
+	 * is compressed, which is not the case for cached blocks when
+	 * zfs_compressed_arc_enabled=0.  Such a buffer holds the logical
+	 * data, while the record is sent with the block's compression and
+	 * psize, so read the block from disk instead.
+	 */
+	if (arc_err == 0 && srdp->io_compressed &&
+	    arc_get_compression(srdp->abuf) != BP_GET_COMPRESS(bp)) {
+		arc_buf_destroy(srdp->abuf, &srdp->abuf);
+		srdp->abuf = NULL;
+		arc_err = SET_ERROR(ENOENT);
+	}
 	/*
 	 * If the data is not already cached in the ARC, we read directly
 	 * from zio.  This avoids the performance overhead of adding a new
@@ -2088,6 +2129,14 @@ setup_to_thread(struct send_thread_arg *to_arg, objset_t *to_os,
 	to_arg->flags = TRAVERSE_PRE | TRAVERSE_PREFETCH_METADATA;
 	if (rawok)
 		to_arg->flags |= TRAVERSE_NO_DECRYPT;
+	/*
+	 * zfs rewrite -P keeps a block's logical birth, but gives an encrypted
+	 * block a new IV and MAC.  The dnode block MACs in a raw stream
+	 * authenticate that MAC, so a raw send of an encrypted dataset has to
+	 * compare the physical birth to include such blocks.
+	 */
+	if (!(rawok && to_os->os_encrypted))
+		to_arg->flags |= TRAVERSE_LOGICAL;
 	if (zfs_send_corrupt_data)
 		to_arg->flags |= TRAVERSE_HARD;
 	to_arg->num_blocks_visited = &dssp->dss_blocks;

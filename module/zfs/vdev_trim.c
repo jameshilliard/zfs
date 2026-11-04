@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -154,6 +144,7 @@ typedef struct trim_args {
 	trim_type_t	trim_type;		/* Manual or auto TRIM */
 	uint64_t	trim_extent_bytes_max;	/* Maximum TRIM I/O size */
 	uint64_t	trim_extent_bytes_min;	/* Minimum TRIM I/O size */
+	uint64_t	trim_generation;	/* Autotrim batch generation */
 	enum trim_flag	trim_flags;		/* TRIM flags (secure) */
 
 	/*
@@ -551,13 +542,8 @@ vdev_trim_range(trim_args_t *ta, uint64_t start, uint64_t size)
 	    vdev_trim_should_stop(vd)) ||
 	    (ta->trim_type == TRIM_TYPE_AUTO &&
 	    vdev_autotrim_should_stop(vd->vdev_top))) {
-		mutex_enter(&vd->vdev_trim_io_lock);
-		vd->vdev_trim_inflight[ta->trim_type]--;
-		mutex_exit(&vd->vdev_trim_io_lock);
-		spa_config_exit(vd->vdev_spa, SCL_STATE_ALL, vd);
 		mutex_exit(&vd->vdev_trim_lock);
-		dmu_tx_commit(tx);
-		return (SET_ERROR(EINTR));
+		goto cancel;
 	}
 	mutex_exit(&vd->vdev_trim_lock);
 
@@ -568,6 +554,12 @@ vdev_trim_range(trim_args_t *ta, uint64_t start, uint64_t size)
 		cb = vdev_trim_cb;
 	} else if (ta->trim_type == TRIM_TYPE_AUTO) {
 		cb = vdev_autotrim_cb;
+		/* Serialize submission with repair invalidating this batch. */
+		mutex_enter(&ta->trim_msp->ms_lock);
+		if (ta->trim_generation != ta->trim_msp->ms_trim_generation) {
+			mutex_exit(&ta->trim_msp->ms_lock);
+			goto cancel;
+		}
 	} else {
 		cb = vdev_trim_simple_cb;
 	}
@@ -576,10 +568,21 @@ vdev_trim_range(trim_args_t *ta, uint64_t start, uint64_t size)
 	    start, size, cb, NULL, ZIO_PRIORITY_TRIM, ZIO_FLAG_CANFAIL,
 	    ta->trim_flags));
 	/* vdev_trim_cb and vdev_autotrim_cb release SCL_STATE_ALL */
+	if (ta->trim_type == TRIM_TYPE_AUTO)
+		mutex_exit(&ta->trim_msp->ms_lock);
 
 	dmu_tx_commit(tx);
 
 	return (0);
+
+cancel:
+	mutex_enter(&vd->vdev_trim_io_lock);
+	vd->vdev_trim_inflight[ta->trim_type]--;
+	cv_broadcast(&vd->vdev_trim_io_cv);
+	mutex_exit(&vd->vdev_trim_io_lock);
+	spa_config_exit(spa, SCL_STATE_ALL, vd);
+	dmu_tx_commit(tx);
+	return (SET_ERROR(EINTR));
 }
 
 /*
@@ -728,7 +731,10 @@ vdev_trim_calculate_progress(vdev_t *vd)
 		 * metaslab.  Load it and walk the free tree for more
 		 * accurate progress estimation.
 		 */
-		VERIFY0(metaslab_load(msp));
+		if (metaslab_load(msp) != 0) {
+			mutex_exit(&msp->ms_lock);
+			continue;
+		}
 
 		zfs_range_tree_t *rt = msp->ms_allocatable;
 		zfs_btree_t *bt = &rt->rt_root;
@@ -857,10 +863,14 @@ vdev_trim_range_add(void *arg, uint64_t start, uint64_t size)
 	 */
 	if (zfs_flags & ZFS_DEBUG_TRIM) {
 		metaslab_t *msp = ta->trim_msp;
-		VERIFY0(metaslab_load(msp));
+		if (metaslab_load(msp) != 0)
+			return;
+		if (ta->trim_type == TRIM_TYPE_AUTO &&
+		    ta->trim_generation != msp->ms_trim_generation)
+			return;
 		VERIFY3B(msp->ms_loaded, ==, B_TRUE);
-		VERIFY(zfs_range_tree_contains(msp->ms_allocatable, start,
-		    size));
+		VERIFY(zfs_range_tree_contains(msp->ms_allocatable,
+		    start, size));
 	}
 
 	ASSERT(vd->vdev_ops->vdev_op_leaf);
@@ -932,10 +942,39 @@ vdev_trim_thread(void *arg)
 			ms_count = vd->vdev_top->vdev_ms_count;
 		}
 
+retry:
 		spa_config_exit(spa, SCL_CONFIG, FTAG);
 		metaslab_disable(msp);
+
+		/*
+		 * Translating the ranges walks up the vdev tree, so hold the
+		 * config lock for it.  The leaf may have been detached, and
+		 * its parent cleared, while the lock was dropped.
+		 */
+		spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+		if (vd->vdev_detached) {
+			metaslab_enable(msp, B_FALSE, B_FALSE);
+			break;
+		}
+
 		mutex_enter(&msp->ms_lock);
-		VERIFY0(metaslab_load(msp));
+		error = metaslab_load(msp);
+		if (error != 0) {
+			mutex_exit(&msp->ms_lock);
+			metaslab_enable(msp, B_FALSE, B_FALSE);
+			if (error == EAGAIN && !vdev_trim_should_stop(vd)) {
+				spa_config_exit(spa, SCL_CONFIG, FTAG);
+				txg_wait_synced(spa_get_dsl(spa), 0);
+				spa_config_enter(spa, SCL_CONFIG, FTAG,
+				    RW_READER);
+				if (!vdev_trim_should_stop(vd))
+					goto retry;
+			}
+			zfs_dbgmsg("trim: unable to load metaslab %llu on "
+			    "vdev %s: error %d",
+			    (u_longlong_t)msp->ms_id, vd->vdev_path, error);
+			break;
+		}
 
 		/*
 		 * If a partial TRIM was requested skip metaslabs which have
@@ -944,7 +983,6 @@ vdev_trim_thread(void *arg)
 		if (msp->ms_sm == NULL && vd->vdev_trim_partial) {
 			mutex_exit(&msp->ms_lock);
 			metaslab_enable(msp, B_FALSE, B_FALSE);
-			spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
 			vdev_trim_calculate_progress(vd);
 			continue;
 		}
@@ -954,6 +992,7 @@ vdev_trim_thread(void *arg)
 		    &ta);
 		zfs_range_tree_vacate(msp->ms_trim, NULL, NULL);
 		mutex_exit(&msp->ms_lock);
+		spa_config_exit(spa, SCL_CONFIG, FTAG);
 
 		error = vdev_trim_ranges(&ta);
 		metaslab_enable(msp, B_TRUE, B_FALSE);
@@ -970,7 +1009,11 @@ vdev_trim_thread(void *arg)
 
 	mutex_enter(&vd->vdev_trim_lock);
 	if (!vd->vdev_trim_exit_wanted) {
-		if (vdev_writeable(vd)) {
+		if (error != 0 && vdev_writeable(vd)) {
+			vdev_trim_change_state(vd, VDEV_TRIM_SUSPENDED,
+			    vd->vdev_trim_rate, vd->vdev_trim_partial,
+			    vd->vdev_trim_secure);
+		} else if (vdev_writeable(vd)) {
 			vdev_trim_change_state(vd, VDEV_TRIM_COMPLETE,
 			    vd->vdev_trim_rate, vd->vdev_trim_partial,
 			    vd->vdev_trim_secure);
@@ -995,6 +1038,7 @@ vdev_trim_thread(void *arg)
 
 	vd->vdev_trim_thread = NULL;
 	cv_broadcast(&vd->vdev_trim_cv);
+	spa_notify_waiters(spa);
 	mutex_exit(&vd->vdev_trim_lock);
 
 	thread_exit();
@@ -1280,7 +1324,8 @@ vdev_autotrim_thread(void *arg)
 			 * Skip the metaslab when it has never been allocated
 			 * or when there are no recent frees to trim.
 			 */
-			if (msp->ms_sm == NULL ||
+			if (msp->ms_load_state != METASLAB_LOAD_NORMAL ||
+			    msp->ms_sm == NULL ||
 			    zfs_range_tree_is_empty(msp->ms_trim)) {
 				mutex_exit(&msp->ms_lock);
 				metaslab_enable(msp, B_FALSE, B_FALSE);
@@ -1311,6 +1356,7 @@ vdev_autotrim_thread(void *arg)
 			    NULL, ZFS_RANGE_SEG64, NULL, 0, 0,
 			    ZFS_RT_F_DYN_NAME,
 			    vdev_rt_name(vd, "autotrim_tree"));
+			uint64_t generation = msp->ms_trim_generation;
 			zfs_range_tree_swap(&msp->ms_trim, &trim_tree);
 			ASSERT(zfs_range_tree_is_empty(msp->ms_trim));
 
@@ -1342,6 +1388,7 @@ vdev_autotrim_thread(void *arg)
 				vdev_t *cvd = ta->trim_vdev;
 
 				ta->trim_msp = msp;
+				ta->trim_generation = generation;
 				ta->trim_extent_bytes_max = extent_bytes_max;
 				ta->trim_extent_bytes_min = extent_bytes_min;
 				ta->trim_type = TRIM_TYPE_AUTO;
@@ -1413,10 +1460,12 @@ vdev_autotrim_thread(void *arg)
 			 */
 			if (zfs_flags & ZFS_DEBUG_TRIM) {
 				mutex_enter(&msp->ms_lock);
-				VERIFY0(metaslab_load(msp));
-				VERIFY3P(tap[0].trim_msp, ==, msp);
-				zfs_range_tree_walk(trim_tree,
-				    vdev_trim_range_verify, &tap[0]);
+				if (metaslab_load(msp) == 0 &&
+				    generation == msp->ms_trim_generation) {
+					VERIFY3P(tap[0].trim_msp, ==, msp);
+					zfs_range_tree_walk(trim_tree,
+					    vdev_trim_range_verify, &tap[0]);
+				}
 				mutex_exit(&msp->ms_lock);
 			}
 

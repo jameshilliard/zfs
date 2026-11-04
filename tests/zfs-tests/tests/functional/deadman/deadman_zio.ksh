@@ -1,24 +1,14 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -35,7 +25,7 @@
 #	3. Inject a 10s zio delay to force long IOs.
 #	4. Read an uncached file in the background.
 #	5. Verify a "deadman" event is posted.
-#	6. Inject a 100ms zio delay which is under the 5s allowed.
+#	6. Inject a 100ms zio delay under the default deadman timeout.
 #	7. Read an uncached file in the background.
 #	8. Verify a "deadman" event is not posted.
 #
@@ -94,8 +84,12 @@ if [ "$events" -lt 1 ]; then
 	log_fail "Expect >=1 deadman events, $events found"
 fi
 
-# 6. Inject a 100ms zio delay which is under the 5s allowed, allow them
-# to run concurrently so they don't get starved in the queue.
+# 6. Restore the default deadman timeout before checking that a short
+#    delay does not generate a deadman event.  A short test timeout can
+#    turn CI VM scheduling stalls into false positives.
+log_must set_tunable64 DEADMAN_ZIOTIME_MS $ZIOTIME_DEFAULT
+
+# Allow the 100ms delays to run concurrently so they don't get starved.
 log_must zpool events -c
 log_must zinject -d $DISK1 -D100:10 $TESTPOOL
 

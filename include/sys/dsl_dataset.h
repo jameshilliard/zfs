@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -40,6 +30,7 @@
 #include <sys/zfs_refcount.h>
 #include <sys/rrwlock.h>
 #include <sys/dsl_crypt.h>
+#include <sys/wmsum.h>
 #include <zfeature_common.h>
 
 #ifdef	__cplusplus
@@ -224,6 +215,21 @@ typedef struct dsl_dataset {
 	list_node_t ds_synced_link;
 
 	/*
+	 * Space accounting deltas of this txg, applied by
+	 * dsl_dataset_apply_deltas().  The first group counts blocks
+	 * referenced only by this dataset, the second blocks moved to the
+	 * deadlist, i.e. now owned by ds_prev.  Non-snapshots only.
+	 */
+	wmsum_t ds_unique_delta;
+	wmsum_t ds_unique_comp_delta;
+	wmsum_t ds_unique_uncomp_delta;
+	wmsum_t ds_dead_delta;
+	wmsum_t ds_dead_comp_delta;
+	wmsum_t ds_dead_uncomp_delta;
+	wmsum_t ds_snap_xfer_delta;
+	wmsum_t ds_prev_unique_delta;
+
+	/*
 	 * ds_phys->ds_<accounting> is also protected by ds_lock.
 	 * Protected by ds_lock:
 	 */
@@ -404,6 +410,7 @@ void dsl_dataset_block_born(dsl_dataset_t *ds, const blkptr_t *bp,
     dmu_tx_t *tx);
 int dsl_dataset_block_kill(dsl_dataset_t *ds, const blkptr_t *bp,
     dmu_tx_t *tx, boolean_t async);
+void dsl_dataset_apply_deltas(dsl_dataset_t *ds, dmu_tx_t *tx);
 void dsl_dataset_block_remapped(dsl_dataset_t *ds, uint64_t vdev,
     uint64_t offset, uint64_t size, uint64_t birth, dmu_tx_t *tx);
 int dsl_dataset_snap_lookup(dsl_dataset_t *ds, const char *name,
@@ -441,6 +448,8 @@ void get_clones_stat(dsl_dataset_t *ds, nvlist_t *nv);
 void dsl_dataset_stats(dsl_dataset_t *os, nvlist_t *nv);
 
 void dsl_dataset_fast_stat(dsl_dataset_t *ds, dmu_objset_stats_t *stat);
+int dsl_dataset_snapshot_list_next(dsl_dataset_t *ds, int namelen,
+    char *name, uint64_t *idp, uint64_t *offp, boolean_t *case_conflict);
 void dsl_dataset_space(dsl_dataset_t *ds,
     uint64_t *refdbytesp, uint64_t *availbytesp,
     uint64_t *usedobjsp, uint64_t *availobjsp);

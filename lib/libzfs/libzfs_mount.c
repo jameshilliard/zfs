@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -62,7 +52,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
-#include <libintl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -439,10 +428,10 @@ zfs_mount_at(zfs_handle_t *zhp, const char *options, int flags,
 	 */
 	rc = zfs_add_options(zhp, mntopts, sizeof (mntopts));
 	if (rc) {
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-		    "default options unavailable"));
+		zfs_error_aux(hdl,
+		    "default options unavailable");
 		return (zfs_error_fmt(hdl, EZFS_MOUNTFAILED,
-		    dgettext(TEXT_DOMAIN, "cannot mount '%s'"),
+		    "cannot mount '%s'",
 		    mountpoint));
 	}
 
@@ -468,9 +457,9 @@ zfs_mount_at(zfs_handle_t *zhp, const char *options, int flags,
 				rc = zfs_crypto_get_encryption_root(zhp,
 				    &is_encroot, prop_encroot);
 				if (rc) {
-					zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+					zfs_error_aux(hdl,
 					    "Failed to get encryption root for "
-					    "'%s'."), zfs_get_name(zhp));
+					    "'%s'.", zfs_get_name(zhp));
 					return (rc);
 				}
 
@@ -489,10 +478,10 @@ zfs_mount_at(zfs_handle_t *zhp, const char *options, int flags,
 				if (rc)
 					return (rc);
 			} else {
-				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-				    "encryption key not loaded"));
+				zfs_error_aux(hdl,
+				    "encryption key not loaded");
 				return (zfs_error_fmt(hdl, EZFS_MOUNTFAILED,
-				    dgettext(TEXT_DOMAIN, "cannot mount '%s'"),
+				    "cannot mount '%s'",
 				    mountpoint));
 			}
 		}
@@ -507,11 +496,11 @@ zfs_mount_at(zfs_handle_t *zhp, const char *options, int flags,
 	/* Create the directory if it doesn't already exist */
 	if (lstat(mountpoint, &buf) != 0) {
 		if (mkdirp(mountpoint, 0755) != 0) {
-			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-			    "failed to create mountpoint: %s"),
+			zfs_error_aux(hdl,
+			    "failed to create mountpoint: %s",
 			    zfs_strerror(errno));
 			return (zfs_error_fmt(hdl, EZFS_MOUNTFAILED,
-			    dgettext(TEXT_DOMAIN, "cannot mount '%s'"),
+			    "cannot mount '%s'",
 			    mountpoint));
 		}
 	}
@@ -536,10 +525,10 @@ zfs_mount_at(zfs_handle_t *zhp, const char *options, int flags,
 	 */
 	if ((flags & MS_OVERLAY) == 0 && !remount &&
 	    !dir_is_empty(mountpoint)) {
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-		    "directory is not empty"));
+		zfs_error_aux(hdl,
+		    "directory is not empty");
 		return (zfs_error_fmt(hdl, EZFS_MOUNTFAILED,
-		    dgettext(TEXT_DOMAIN, "cannot mount '%s'"), mountpoint));
+		    "cannot mount '%s'", mountpoint));
 	}
 
 	/* perform the mount */
@@ -551,26 +540,26 @@ zfs_mount_at(zfs_handle_t *zhp, const char *options, int flags,
 		 * common ones to improve upon.
 		 */
 		if (rc == EBUSY) {
-			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-			    "mountpoint or dataset is busy"));
+			zfs_error_aux(hdl,
+			    "mountpoint or dataset is busy");
 		} else if (rc == EPERM) {
-			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-			    "Insufficient privileges"));
+			zfs_error_aux(hdl,
+			    "Insufficient privileges");
 		} else if (rc == ENOTSUP) {
 			int spa_version;
 
 			VERIFY0(zfs_spa_version(zhp, &spa_version));
-			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+			zfs_error_aux(hdl,
 			    "Can't mount a version %llu "
 			    "file system on a version %d pool. Pool must be"
-			    " upgraded to mount this file system."),
+			    " upgraded to mount this file system.",
 			    (u_longlong_t)zfs_prop_get_int(zhp,
 			    ZFS_PROP_VERSION), spa_version);
 		} else {
 			zfs_error_aux(hdl, "%s", zfs_strerror(rc));
 		}
 		return (zfs_error_fmt(hdl, EZFS_MOUNTFAILED,
-		    dgettext(TEXT_DOMAIN, "cannot mount '%s'"),
+		    "cannot mount '%s'",
 		    zhp->zfs_name));
 	}
 
@@ -616,7 +605,7 @@ unmount_one(zfs_handle_t *zhp, const char *mountpoint, int flags)
 		}
 		if (zhp) {
 			return (zfs_error_fmt(zhp->zfs_hdl, libzfs_err,
-			    dgettext(TEXT_DOMAIN, "cannot unmount '%s'"),
+			    "cannot unmount '%s'",
 			    mountpoint));
 		} else {
 			return (-1);
@@ -732,7 +721,7 @@ unshare_one(libzfs_handle_t *hdl, const char *name, const char *mountpoint,
 	int err = sa_disable_share(mountpoint, proto);
 	if (err != SA_OK)
 		return (zfs_error_fmt(hdl, proto_table[proto].p_unshare_err,
-		    dgettext(TEXT_DOMAIN, "cannot unshare '%s': %s"),
+		    "cannot unshare '%s': %s",
 		    name, sa_errorstr(err)));
 
 	return (0);
@@ -783,7 +772,7 @@ zfs_share(zfs_handle_t *zhp, const enum sa_protocol *proto)
 		if (err != SA_OK) {
 			return (zfs_error_fmt(zhp->zfs_hdl,
 			    proto_table[*curr_proto].p_share_err,
-			    dgettext(TEXT_DOMAIN, "cannot share '%s: %s'"),
+			    "cannot share '%s: %s'",
 			    zfs_get_name(zhp), sa_errorstr(err)));
 		}
 

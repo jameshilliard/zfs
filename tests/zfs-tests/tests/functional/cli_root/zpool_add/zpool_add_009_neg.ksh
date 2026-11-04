@@ -1,24 +1,14 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -57,17 +47,19 @@ log_assert "'zpool add' should fail if vdevs are the same or vdev is " \
 
 log_onexit cleanup
 
-create_pool $TESTPOOL $DISK0
+create_sparse_files "disk" 2 $MINVDEVSIZE2
+
+create_pool $TESTPOOL $disk0
 log_must poolexists $TESTPOOL
 
-log_mustnot zpool add -f $TESTPOOL $DISK0
+log_mustnot zpool add -f $TESTPOOL $disk0
 
-for type in "" "mirror" "raidz" "draid" "spare" "log" "dedup" "special" "cache"
+for type in "" "mirror" "raidz" "anymirror" "draid" "spare" "log" "dedup" "special" "cache"
 do
-	log_mustnot zpool add -f $TESTPOOL $type $DISK0 $DISK1
-	log_mustnot zpool add --allow-in-use $TESTPOOL $type $DISK0 $DISK1
-	log_mustnot zpool add -f $TESTPOOL $type $DISK1 $DISK1
-	log_mustnot zpool add --allow-in-use $TESTPOOL $type $DISK1 $DISK1
+	log_mustnot zpool add -f $TESTPOOL $type $disk0 $disk1
+	log_mustnot zpool add --allow-in-use $TESTPOOL $type $disk0 $disk1
+	log_mustnot zpool add -f $TESTPOOL $type $disk1 $disk1
+	log_mustnot zpool add --allow-in-use $TESTPOOL $type $disk1 $disk1
 done
 
 log_pass "'zpool add' get fail as expected if vdevs are the same or vdev is " \

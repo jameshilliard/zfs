@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -31,6 +21,7 @@
  * Copyright (c) 2019, Allan Jude
  * Copyright (c) 2022 Hewlett Packard Enterprise Development LP.
  * Copyright (c) 2021, 2022 by Pawel Jakub Dawidek
+ * Copyright 2026 Oxide Computer Company
  */
 
 #include <sys/dmu.h>
@@ -1544,27 +1535,6 @@ dmu_write_by_dnode(dnode_t *dn, uint64_t offset, uint64_t size,
 }
 
 void
-dmu_prealloc(objset_t *os, uint64_t object, uint64_t offset, uint64_t size,
-    dmu_tx_t *tx)
-{
-	dmu_buf_t **dbp;
-	int numbufs, i;
-
-	if (size == 0)
-		return;
-
-	VERIFY0(dmu_buf_hold_array(os, object, offset, size,
-	    FALSE, FTAG, &numbufs, &dbp, DMU_READ_PREFETCH));
-
-	for (i = 0; i < numbufs; i++) {
-		dmu_buf_t *db = dbp[i];
-
-		dmu_buf_will_not_fill(db, tx);
-	}
-	dmu_buf_rele_array(dbp, numbufs, FTAG);
-}
-
-void
 dmu_write_embedded(objset_t *os, uint64_t object, uint64_t offset,
     void *data, uint8_t etype, uint8_t comp, int uncompressed_size,
     int compressed_size, int byteorder, dmu_tx_t *tx)
@@ -2113,6 +2083,8 @@ dmu_sync_done(zio_t *zio, arc_buf_t *buf, void *varg)
 
 	mutex_enter(&db->db_mtx);
 	ASSERT(dr->dt.dl.dr_override_state == DR_IN_DMU_SYNC);
+	ASSERT3P(dr->dt.dl.dr_sync_arg, ==, dsa);
+	dr->dt.dl.dr_sync_arg = NULL;
 	if (zio->io_error == 0) {
 		ASSERT0(dr->dt.dl.dr_has_raw_params);
 		dr->dt.dl.dr_nopwrite = !!(zio->io_flags & ZIO_FLAG_NOPWRITE);
@@ -2154,6 +2126,26 @@ dmu_sync_done(zio_t *zio, arc_buf_t *buf, void *varg)
 
 	if (dsa->dsa_done)
 		dsa->dsa_done(dsa->dsa_zgd, zio->io_error);
+
+	/*
+	 * Give our blkptr to the dmu_sync()s that waited for this write.
+	 * No more can be added, since dr_sync_arg is cleared.  Their log
+	 * blocks wait for their dsw_zio.
+	 */
+	dmu_sync_waiter_t *dsw;
+	while ((dsw = list_remove_head(&dsa->dsa_waiters)) != NULL) {
+		if (zio->io_error == 0) {
+			*dsw->dsw_zgd->zgd_bp = *zio->io_bp;
+			zil_lwb_add_block(dsw->dsw_zgd->zgd_lwb,
+			    dsw->dsw_zgd->zgd_bp);
+		} else {
+			dsw->dsw_zio->io_error = zio->io_error;
+		}
+		dsw->dsw_done(dsw->dsw_zgd, zio->io_error);
+		zio_nowait(dsw->dsw_zio);
+		kmem_free(dsw, sizeof (*dsw));
+	}
+	list_destroy(&dsa->dsa_waiters);
 
 	kmem_free(dsa, sizeof (*dsa));
 }
@@ -2229,6 +2221,7 @@ dmu_sync_late_arrival(zio_t *pio, objset_t *os, dmu_sync_cb_t *done, zgd_t *zgd,
 	dsa->dsa_done = done;
 	dsa->dsa_zgd = zgd;
 	dsa->dsa_tx = tx;
+	dsa->dsa_dio_verify_fails = NULL;
 
 	/*
 	 * Since we are currently syncing this txg, it's nontrivial to
@@ -2257,7 +2250,8 @@ dmu_sync_late_arrival(zio_t *pio, objset_t *os, dmu_sync_cb_t *done, zgd_t *zgd,
 	    abd_get_from_buf(zgd->zgd_db->db_data, zgd->zgd_db->db_size),
 	    zgd->zgd_db->db_size, zgd->zgd_db->db_size, zp,
 	    dmu_sync_late_arrival_ready, NULL, dmu_sync_late_arrival_done,
-	    dsa, ZIO_PRIORITY_SYNC_WRITE, ZIO_FLAG_CANFAIL, zb));
+	    dsa, ZIO_PRIORITY_SYNC_WRITE, ZIO_FLAG_CANFAIL | ZIO_FLAG_ZILWRITE,
+	    zb));
 
 	return (0);
 }
@@ -2275,17 +2269,20 @@ dmu_sync_late_arrival(zio_t *pio, objset_t *os, dmu_sync_cb_t *done, zgd_t *zgd,
  *	ENOENT: the block was dbuf_free_range()'d, so there's nothing to do.
  *		The caller should not log the write.
  *
- *	EALREADY: this block is already in the process of being synced.
- *		The caller should track its progress (somehow).
- *
- *	EIO: could not do the I/O.
+ *	EIO: could not do the I/O, or the block was replaced by a block
+ *		clone.
  *		The caller should do a txg_wait_synced().
  *
  *	0: the I/O has been initiated.
  *		The caller should log this blkptr in the done callback.
  *		It is possible that the I/O will fail, in which case
  *		the error will be reported to the done callback and
- *		propagated to pio from zio_done().
+ *		propagated to pio from zio_done().  If another dmu_sync()
+ *		of the block in this txg is in progress, *zgd_bp is set to
+ *		its blkptr, and the done callback is called with its error,
+ *		when it completes.  If one has completed, *zgd_bp is set to
+ *		its blkptr and the done callback is called before dmu_sync()
+ *		returns.
  */
 int
 dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
@@ -2321,7 +2318,6 @@ dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
 	 * sync thread will block in dbuf_sync_leaf() until we drop db_mtx.
 	 */
 	mutex_enter(&db->db_mtx);
-
 	if (txg <= spa_last_synced_txg(os->os_spa)) {
 		/*
 		 * This txg has already synced.  There's nothing to do.
@@ -2400,33 +2396,74 @@ dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
 	}
 
 	ASSERT(dr->dr_txg == txg);
-	if (dr->dt.dl.dr_override_state == DR_IN_DMU_SYNC ||
-	    dr->dt.dl.dr_override_state == DR_OVERRIDDEN) {
+	if (dr->dt.dl.dr_override_state == DR_IN_DMU_SYNC) {
+		dmu_sync_arg_t *wdsa = dr->dt.dl.dr_sync_arg;
+		dmu_sync_waiter_t *dsw;
+
 		/*
-		 * We have already issued a sync write for this buffer,
-		 * or this buffer has already been synced.  It could not
-		 * have been dirtied since, or we would have cleared the state.
+		 * Another sync write of this buffer is in progress.  Its copy
+		 * holds our data: the buffer could not have been dirtied
+		 * since, or we would have cleared the state.  dmu_sync_done()
+		 * will give us its blkptr.  Until then, hold our log block
+		 * with a child of pio, as our own write would.
+		 */
+		dsw = kmem_alloc(sizeof (*dsw), KM_SLEEP);
+		dsw->dsw_done = done;
+		dsw->dsw_zgd = zgd;
+		dsw->dsw_zio = zio_null(pio, os->os_spa, NULL, NULL, NULL,
+		    ZIO_FLAG_CANFAIL);
+		list_insert_tail(&wdsa->dsa_waiters, dsw);
+		mutex_exit(&db->db_mtx);
+		return (0);
+	}
+	if (dr->dt.dl.dr_brtwrite) {
+		/*
+		 * A block clone replaced this buffer after our write.  Its
+		 * blkptr points to a block allocated in an earlier txg,
+		 * which the log can't claim or free, so wait for the txg to
+		 * sync instead.  Dropping the record would not do: the log
+		 * could end after a later record but before the clone's,
+		 * and replay would apply that later write without this one.
 		 */
 		mutex_exit(&db->db_mtx);
-		return (SET_ERROR(EALREADY));
+		return (SET_ERROR(EIO));
+	}
+	if (dr->dt.dl.dr_override_state == DR_OVERRIDDEN) {
+		/*
+		 * This buffer has already been written by a sync write, and
+		 * not dirtied since.  Log that write's blkptr.  The same
+		 * blkptr may be in other log records; claim and free skip
+		 * duplicates.  (zfs_get_data() logs a Direct I/O write's
+		 * blkptr itself, without calling dmu_sync().)
+		 */
+		*zgd->zgd_bp = dr->dt.dl.dr_overridden_by;
+		mutex_exit(&db->db_mtx);
+		zil_lwb_add_block(zgd->zgd_lwb, zgd->zgd_bp);
+		done(zgd, 0);
+		return (0);
 	}
 
 	ASSERT0(dr->dt.dl.dr_has_raw_params);
 	ASSERT(dr->dt.dl.dr_override_state == DR_NOT_OVERRIDDEN);
-	dr->dt.dl.dr_override_state = DR_IN_DMU_SYNC;
-	mutex_exit(&db->db_mtx);
 
 	dsa = kmem_alloc(sizeof (dmu_sync_arg_t), KM_SLEEP);
 	dsa->dsa_dr = dr;
 	dsa->dsa_done = done;
 	dsa->dsa_zgd = zgd;
 	dsa->dsa_tx = NULL;
+	dsa->dsa_dio_verify_fails = NULL;
+	list_create(&dsa->dsa_waiters, sizeof (dmu_sync_waiter_t),
+	    offsetof(dmu_sync_waiter_t, dsw_node));
+
+	dr->dt.dl.dr_override_state = DR_IN_DMU_SYNC;
+	dr->dt.dl.dr_sync_arg = dsa;
+	mutex_exit(&db->db_mtx);
 
 	zio_nowait(arc_write(pio, os->os_spa, txg, zgd->zgd_bp,
 	    dr->dt.dl.dr_data, !DBUF_IS_CACHEABLE(db),
 	    dbuf_is_l2cacheable(db, NULL), &zp, dmu_sync_ready, NULL,
-	    dmu_sync_done, dsa, ZIO_PRIORITY_SYNC_WRITE, ZIO_FLAG_CANFAIL,
-	    &zb));
+	    dmu_sync_done, dsa, ZIO_PRIORITY_SYNC_WRITE,
+	    ZIO_FLAG_CANFAIL | ZIO_FLAG_ZILWRITE, &zb));
 
 	return (0);
 }
@@ -2736,8 +2773,9 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
  * a dnode is dirty report the dnode as having no holes by returning EBUSY
  * which is always safe to do.
  */
-int
-dmu_offset_next(objset_t *os, uint64_t object, boolean_t hole, uint64_t *off)
+static int
+dmu_offset_next_impl(objset_t *os, uint64_t object, boolean_t hole,
+    uint64_t *off, boolean_t wait)
 {
 	dnode_t *dn;
 	uint64_t txg, maxtxg = 0;
@@ -2752,9 +2790,9 @@ restart:
 
 	if (dnode_is_dirty(dn)) {
 		/*
-		 * If the zfs_dmu_offset_next_sync module option is enabled
-		 * then hole reporting has been requested.  Dirty dnodes
-		 * must be synced to disk to accurately report holes.
+		 * If the caller asked to wait, as dmu_offset_next()
+		 * does when zfs_dmu_offset_next_sync is set, dirty
+		 * dnodes must be synced to disk to report holes.
 		 *
 		 * Provided a RL_READER rangelock spanning 0-UINT64_MAX is
 		 * held by the caller only limited restarts will be required.
@@ -2762,7 +2800,7 @@ restart:
 		 * returning EBUSY and not reporting holes after at most
 		 * TXG_CONCURRENT_STATES (3) restarts.
 		 */
-		if (zfs_dmu_offset_next_sync) {
+		if (wait) {
 			rw_exit(&dn->dn_struct_rwlock);
 			dnode_rele(dn, FTAG);
 
@@ -2786,6 +2824,21 @@ restart:
 	dnode_rele(dn, FTAG);
 
 	return (err);
+}
+
+int
+dmu_offset_next(objset_t *os, uint64_t object, boolean_t hole,
+    uint64_t *off)
+{
+	return (dmu_offset_next_impl(os, object, hole, off,
+	    zfs_dmu_offset_next_sync));
+}
+
+int
+dmu_offset_next_nowait(objset_t *os, uint64_t object, boolean_t hole,
+    uint64_t *off)
+{
+	return (dmu_offset_next_impl(os, object, hole, off, B_FALSE));
 }
 
 int
@@ -2836,6 +2889,44 @@ dmu_read_l0_bps(objset_t *os, uint64_t object, uint64_t offset, uint64_t length,
 			}
 		} else {
 			bp = db->db_blkptr;
+		}
+
+		/*
+		 * A block with a pending free (a truncate or hole
+		 * punch not yet synced) must not be cloned: the clone
+		 * would add a BRT reference to a block about to be
+		 * freed, so the pending clone would apply onto an
+		 * already-freed DVA and double free it.  Report
+		 * EAGAIN and let the caller retry once the free
+		 * syncs (the block then reads as a hole).
+		 *
+		 * A hole (or absent BP) has nothing to free and is
+		 * cloned as a hole below.  When the head dirty record
+		 * overrode the BP (a clone in this txg) only frees
+		 * recorded after the override count against it;
+		 * earlier frees predate it.  This mirrors
+		 * dbuf_read_hole().
+		 */
+		if (bp != NULL && !BP_IS_HOLE(bp)) {
+			dbuf_dirty_record_t *dr =
+			    list_head(&db->db_dirty_records);
+			boolean_t freed;
+
+			DB_DNODE_ENTER(db);
+			dnode_t *rdn = DB_DNODE(db);
+			if (dr != NULL && dr->dt.dl.dr_brtwrite) {
+				freed = dnode_block_freed_after(rdn,
+				    db->db_blkid, dr->dr_txg);
+			} else {
+				freed = dnode_block_freed(rdn,
+				    db->db_blkid);
+			}
+			DB_DNODE_EXIT(db);
+			if (freed) {
+				mutex_exit(&db->db_mtx);
+				error = SET_ERROR(EAGAIN);
+				goto out;
+			}
 		}
 
 		mutex_exit(&db->db_mtx);
@@ -3180,7 +3271,6 @@ EXPORT_SYMBOL(dmu_write_by_dnode);
 EXPORT_SYMBOL(dmu_write_uio);
 EXPORT_SYMBOL(dmu_write_uio_dbuf);
 EXPORT_SYMBOL(dmu_write_uio_dnode);
-EXPORT_SYMBOL(dmu_prealloc);
 EXPORT_SYMBOL(dmu_object_info);
 EXPORT_SYMBOL(dmu_object_info_from_dnode);
 EXPORT_SYMBOL(dmu_object_info_from_db);

@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -60,6 +50,9 @@
 #include <sys/zfs_sa.h>
 #include <sys/zfs_stat.h>
 #include <linux/mm_compat.h>
+#ifdef CONFIG_FS_POSIX_ACL
+#include <linux/posix_acl.h>
+#endif
 
 #include "zfs_prop.h"
 #include "zfs_comutil.h"
@@ -92,6 +85,22 @@ zfs_rangelock_cb(zfs_locked_range_t *new, void *arg)
 	if (new->lr_type == RL_APPEND) {
 		new->lr_offset = zp->z_size;
 		new->lr_type = RL_WRITER;
+	}
+
+	/*
+	 * A write starting past the end of the file also extends the file
+	 * over the rest of its last page, which zfs_zero_eof_page() has to
+	 * zero first, so lock from the current end of file.
+	 */
+	if (new->lr_offset > zp->z_size &&
+	    P2PHASE(zp->z_size, PAGE_SIZE) != 0) {
+		uint64_t gap = new->lr_offset - zp->z_size;
+
+		new->lr_offset = zp->z_size;
+		if (new->lr_length > UINT64_MAX - gap)
+			new->lr_length = UINT64_MAX;
+		else
+			new->lr_length += gap;
 	}
 
 	/*
@@ -789,22 +798,28 @@ zfs_mknode(znode_t *dzp, vattr_t *vap, dmu_tx_t *tx, cred_t *cr,
 	if (flag & IS_XATTR)
 		pflags |= ZFS_XATTR;
 
-	if (S_ISREG(vap->va_mode) || S_ISDIR(vap->va_mode)) {
-		/*
-		 * With ZFS_PROJID flag, we can easily know whether there is
-		 * project ID stored on disk or not. See zpl_get_file_info().
-		 */
-		if (obj_type != DMU_OT_ZNODE &&
-		    dmu_objset_projectquota_enabled(zfsvfs->z_os))
-			pflags |= ZFS_PROJID;
+	/*
+	 * With ZFS_PROJID flag, we can easily know whether there is
+	 * project ID stored on disk or not. See zpl_get_file_info().
+	 */
+	if (obj_type != DMU_OT_ZNODE &&
+	    dmu_objset_projectquota_enabled(zfsvfs->z_os))
+		pflags |= ZFS_PROJID;
 
-		/*
-		 * Inherit project ID from parent if required.
-		 */
-		projid = zfs_inherit_projid(dzp);
-		if (dzp->z_pflags & ZFS_PROJINHERIT)
-			pflags |= ZFS_PROJINHERIT;
-	}
+	/*
+	 * Inherit project ID from parent if required.  Every object type
+	 * takes part, as ext4 and XFS do: an object that carried no project
+	 * ID of its own would be treated as belonging to a different project
+	 * than the directory holding it, so zfs_rename() and zfs_link()
+	 * would refuse it with EXDEV even within its own project.
+	 *
+	 * The ZFS_PROJINHERIT flag itself keeps passing to regular files and
+	 * directories only, as before, so that lsattr(1) output is unchanged.
+	 */
+	projid = zfs_inherit_projid(dzp);
+	if ((S_ISREG(vap->va_mode) || S_ISDIR(vap->va_mode)) &&
+	    (dzp->z_pflags & ZFS_PROJINHERIT))
+		pflags |= ZFS_PROJINHERIT;
 
 	/*
 	 * No execs denied will be determined when zfs_mode_compute() is called.
@@ -1145,8 +1160,13 @@ again:
 		zfs_znode_hold_exit(zfsvfs, zh);
 
 		if (err == EAGAIN) {
-			/* inode might need this to finish evict */
-			cond_resched();
+			/*
+			 * The inode is being evicted, possibly by a thread
+			 * working through a long dispose list.  Sleep rather
+			 * than spin so that thread gets the CPU and the hold
+			 * locks it needs; xfs_iget() does the same.
+			 */
+			delay(1);
 			goto again;
 		}
 		return (err);
@@ -1202,6 +1222,15 @@ zfs_rezget(znode_t *zp)
 	if (zp->z_is_ctldir)
 		return (0);
 
+	/*
+	 * Drop cached pages before reloading the znode.  After a rollback or
+	 * a forced receive the object may hold different data under the same
+	 * inode, size and generation; stale Uptodate pages would otherwise be
+	 * served by mappedread() and mmap() (see #10931).  FreeBSD does the
+	 * same here via vn_pages_remove().
+	 */
+	truncate_inode_pages(ZTOI(zp)->i_mapping, 0);
+
 	zh = zfs_znode_hold_enter(zfsvfs, obj_num);
 
 	mutex_enter(&zp->z_acl_lock);
@@ -1210,6 +1239,12 @@ zfs_rezget(znode_t *zp)
 		zp->z_acl_cached = NULL;
 	}
 	mutex_exit(&zp->z_acl_lock);
+
+#ifdef CONFIG_FS_POSIX_ACL
+	/* The VFS cache can still describe the pre-rollback inode. */
+	forget_cached_acl(ZTOI(zp), ACL_TYPE_ACCESS);
+	forget_cached_acl(ZTOI(zp), ACL_TYPE_DEFAULT);
+#endif
 
 	rw_enter(&zp->z_xattr_lock, RW_WRITER);
 	if (zp->z_xattr_cached) {
@@ -1531,6 +1566,9 @@ zfs_extend(znode_t *zp, uint64_t end)
 		zfs_rangelock_exit(lr);
 		return (0);
 	}
+
+	zfs_zero_eof_page(zp, lr, end);
+
 	tx = dmu_tx_create(zfsvfs->z_os);
 	dmu_tx_hold_sa(tx, zp->z_sa_hdl, B_FALSE);
 	zfs_sa_upgrade_txholds(tx, zp);
@@ -1618,6 +1656,45 @@ zfs_zero_partial_page(znode_t *zp, uint64_t start, uint64_t len)
 		unlock_page(pp);
 		put_page(pp);
 	}
+}
+
+/*
+ * Zero the cached part of the file's last page past the end of the file,
+ * up to end, before the file is extended to end or beyond.
+ *
+ * Stores through a shared mapping can leave data in that part of the page.
+ * zfs_putpage() never writes it out while it is past the end of the file,
+ * but once the file is extended over it, read() would return it from the
+ * page cache, and if the page is (or becomes) dirty, writeback would write
+ * it to disk.  POSIX requires that such modifications are never written
+ * out, and Linux file systems zero this range when the file is extended.
+ *
+ * lr is the caller's RL_WRITER range lock, which zfs_rangelock_cb() extends
+ * down to the end of the file.  Nothing is zeroed outside of it, so the
+ * page cache stays in sync with the ARC if the file was extended by someone
+ * else while the lock was being acquired.
+ */
+void
+zfs_zero_eof_page(znode_t *zp, zfs_locked_range_t *lr, uint64_t end)
+{
+	uint64_t size = zp->z_size;
+	uint64_t len;
+
+	ASSERT3U(lr->lr_type, ==, RL_WRITER);
+
+	if (end <= size || P2PHASE(size, PAGE_SIZE) == 0 ||
+	    lr->lr_offset > size)
+		return;
+
+	end = MIN(end, P2ROUNDUP(size, PAGE_SIZE));
+	if (lr->lr_length != UINT64_MAX)
+		end = MIN(end, lr->lr_offset + lr->lr_length);
+	if (end <= size)
+		return;
+
+	len = end - size;
+	if (zn_has_cached_data(zp, size, size + len - 1))
+		zfs_zero_partial_page(zp, size, len);
 }
 
 /*

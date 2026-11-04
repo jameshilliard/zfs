@@ -1,8 +1,6 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
-#
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
 # You may only use this file in accordance with the terms of version
@@ -10,9 +8,7 @@
 #
 # A full copy of the text of the CDDL should have accompanied this
 # source.  A copy of the CDDL is also available via the Internet at
-# http://www.illumos.org/license/CDDL.
-#
-# CDDL HEADER END
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -91,6 +87,7 @@ log_must eval "zfs send $POOL_NAME/testvol@snap1 | \
 	zfs recv $POOL_NAME/encroot/testvol"
 block_device_wait /dev/zvol/$POOL_NAME/encroot/testvol
 log_must dd if=/dev/zero of=/dev/zvol/$POOL_NAME/encroot/testvol bs=512 count=1
+block_device_wait /dev/zvol/$POOL_NAME/encroot/testvol
 new_mntpnt=$(get_prop mountpoint $POOL_NAME/encroot/testfs)
 log_must eval "ls $new_mntpnt | grep -q testfile"
 log_must zfs destroy -r $POOL_NAME/testfs

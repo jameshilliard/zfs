@@ -18,8 +18,17 @@ UNIT_TESTS = \
 	%D%/test_zap \
 	%D%/test_namecheck \
 	%D%/test_btree \
+	%D%/test_range_tree \
+	%D%/test_space_map \
+	%D%/test_metaslab \
 	%D%/test_fletcher \
-	%D%/test_sha2
+	%D%/test_sha2 \
+	%D%/test_cityhash \
+	%D%/test_nvpair \
+	%D%/test_backtrace \
+	%D%/test_timer \
+	%D%/test_zfs_file \
+	%D%/test_indirect_mapping
 noinst_PROGRAMS = $(UNIT_TESTS)
 
 
@@ -69,6 +78,57 @@ nodist_%C%_test_btree_SOURCES = \
 	libunit.la
 
 
+%C%_test_range_tree_CFLAGS = $(AM_CFLAGS)
+
+nodist_%C%_test_range_tree_SOURCES = \
+	module/zfs/btree.c \
+	module/zfs/range_tree.c
+
+%C%_test_range_tree_SOURCES = \
+	%D%/test_range_tree.c
+
+%C%_test_range_tree_LDADD = \
+	libspl.la \
+	libunit.la
+
+
+%C%_test_space_map_CFLAGS = $(AM_CFLAGS)
+
+nodist_%C%_test_space_map_SOURCES = \
+	module/zfs/btree.c \
+	module/zfs/range_tree.c \
+	module/zfs/space_map.c
+
+%C%_test_space_map_SOURCES = \
+	%D%/test_space_map.c
+
+%C%_test_space_map_LDADD = \
+	libspl.la \
+	libunit.la
+
+
+# Keep the accounting assertions enabled even in a non-debug build.
+%C%_test_metaslab_CFLAGS = $(AM_CFLAGS) -DDEBUG -UNDEBUG
+%C%_test_metaslab_CPPFLAGS = $(AM_CPPFLAGS) $(LIBZPOOL_CPPFLAGS)
+
+%C%_test_metaslab_SOURCES = \
+	%D%/test_metaslab.c \
+	%D%/munit.c
+
+# These sources are included to exercise their private helpers.
+%C%_test_metaslab_COVERAGE_FILES = \
+	module/zfs/metaslab.c \
+	module/zfs/vdev_trim.c
+
+# Reuse libzpool's other objects without linking a second copy of the modules
+# supplied by the test. These also provide the services that libunit stubs out.
+%C%_test_metaslab_LDADD = \
+	$(filter-out module/zfs/libzpool_la-metaslab.lo \
+	    module/zfs/libzpool_la-vdev_trim.lo, $(libzpool_la_OBJECTS)) \
+	$(libzpool_la_LIBADD) \
+	libspl.la
+
+
 %C%_test_fletcher_CFLAGS = $(AM_CFLAGS)
 
 nodist_%C%_test_fletcher_SOURCES = \
@@ -102,6 +162,81 @@ nodist_%C%_test_sha2_SOURCES = \
 	libunit.la
 
 
+%C%_test_cityhash_CFLAGS = $(AM_CFLAGS)
+
+nodist_%C%_test_cityhash_SOURCES = \
+	module/zcommon/cityhash.c
+
+%C%_test_cityhash_SOURCES = \
+	%D%/test_cityhash.c
+
+%C%_test_cityhash_LDADD = \
+	libunit.la \
+	libspl.la
+
+
+%C%_test_nvpair_CFLAGS = $(AM_CFLAGS) $(LIBTIRPC_CFLAGS)
+
+nodist_%C%_test_nvpair_SOURCES = \
+	module/nvpair/nvpair.c \
+	module/nvpair/fnvpair.c \
+	module/nvpair/nvpair_alloc_fixed.c \
+	lib/libnvpair/nvpair_alloc_system.c \
+	lib/libnvpair/libnvpair.c
+
+%C%_test_nvpair_SOURCES = \
+	%D%/test_nvpair.c
+
+%C%_test_nvpair_LDADD = \
+	libspl.la \
+	$(LIBTIRPC_LIBS) \
+	libunit.la
+
+
+%C%_test_backtrace_CFLAGS = $(AM_CFLAGS)
+
+%C%_test_backtrace_SOURCES = \
+	%D%/test_backtrace.c
+
+%C%_test_backtrace_LDADD = \
+	libunit.la \
+	libspl.la
+
+
+%C%_test_timer_CFLAGS = $(AM_CFLAGS)
+
+%C%_test_timer_SOURCES = \
+	%D%/test_timer.c
+
+%C%_test_timer_LDADD = \
+	libunit.la \
+	libspl.la
+
+
+%C%_test_zfs_file_CFLAGS = $(AM_CFLAGS)
+
+%C%_test_zfs_file_SOURCES = \
+	lib/libzpool/zfs_file_os.c \
+	%D%/test_zfs_file.c
+
+%C%_test_zfs_file_LDADD = \
+	libunit.la \
+	libspl.la
+
+
+%C%_test_indirect_mapping_CFLAGS = $(AM_CFLAGS)
+
+nodist_%C%_test_indirect_mapping_SOURCES = \
+	module/zfs/vdev_indirect_mapping.c
+
+%C%_test_indirect_mapping_SOURCES = \
+	%D%/test_indirect_mapping.c
+
+%C%_test_indirect_mapping_LDADD = \
+	libspl.la \
+	libunit.la
+
+
 # test run and coverage targets below
 PHONY += unit unit-coverage unit-coverage-html
 
@@ -127,7 +262,9 @@ _unit_run_%: %D%/%
 		--rc lcov_branch_coverage=1 \
 		--rc geninfo_unexecuted_blocks=1 \
 		$(addprefix --include $(abs_top_builddir)/, $(call \
-		    $(join $(join nodist_%C%_, $(notdir $<)), _SOURCES))) \
+		    $(join $(join nodist_%C%_, $(notdir $<)), _SOURCES)) \
+		    $(call $(join $(join %C%_, $(notdir $<)), \
+		    _COVERAGE_FILES))) \
 		2>/dev/null
 
 _unit_coverage_%: %D%/%.info

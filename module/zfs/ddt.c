@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -812,13 +802,13 @@ ddt_phys_extend(ddt_univ_phys_t *ddp, ddt_phys_variant_t v, const blkptr_t *bp)
 }
 
 void
-ddt_phys_unextend(ddt_univ_phys_t *cur, ddt_univ_phys_t *orig,
+ddt_phys_unextend(ddt_univ_phys_t *cur, const ddt_univ_phys_t *orig,
     ddt_phys_variant_t v)
 {
 	ASSERT3U(v, <, DDT_PHYS_NONE);
 	dva_t *cur_dvas = (v == DDT_PHYS_FLAT) ?
 	    cur->ddp_flat.ddp_dva : cur->ddp_trad[v].ddp_dva;
-	dva_t *orig_dvas = (v == DDT_PHYS_FLAT) ?
+	const dva_t *orig_dvas = (v == DDT_PHYS_FLAT) ?
 	    orig->ddp_flat.ddp_dva : orig->ddp_trad[v].ddp_dva;
 
 	for (int d = 0; d < SPA_DVAS_PER_BP; d++)
@@ -1474,6 +1464,20 @@ ddt_key_compare(const void *x1, const void *x2)
 	return (0);
 }
 
+/*
+ * Estimate the worst-case amount of MOS data the sync thread may dirty
+ * to add, update or remove one DDT entry: one ZAP leaf block.  This is
+ * an underestimation for entries changing class (two leaves in two
+ * different ZAPs plus indirects), but sequential log flush usually
+ * combines many entries per leaf, erring the other way.
+ */
+uint64_t
+ddt_sync_dirty_est(spa_t *spa)
+{
+	(void) spa;
+	return (1ULL << ddt_zap_default_bs);
+}
+
 /* Create the containing dir for this DDT and bump the feature count */
 static void
 ddt_create_dir(ddt_t *ddt, dmu_tx_t *tx)
@@ -1874,30 +1878,60 @@ ddt_unload(spa_t *spa)
 	}
 }
 
+/*
+ * Whether the DDT walk of a scan, which covers the classes up to
+ * max_class, visits this block.  The key alone is not enough: a block
+ * whose unique entry was pruned keeps its dedup bit, and the same data
+ * written again creates a new entry with that key at other DVAs.
+ */
 boolean_t
 ddt_class_contains(spa_t *spa, ddt_class_t max_class, const blkptr_t *bp)
 {
 	ddt_t *ddt;
 	ddt_key_t ddk;
+	ddt_entry_t *dde;
+	boolean_t found = B_FALSE;
 
 	if (!BP_GET_DEDUP(bp))
 		return (B_FALSE);
-
-	if (max_class == DDT_CLASS_UNIQUE)
-		return (B_TRUE);
 
 	ddt = spa->spa_ddt[BP_GET_CHECKSUM(bp)];
 
 	ddt_key_fill(&ddk, bp);
 
-	for (ddt_type_t type = 0; type < DDT_TYPES; type++) {
-		for (ddt_class_t class = 0; class <= max_class; class++) {
-			if (ddt_object_contains(ddt, type, class, &ddk) == 0)
-				return (B_TRUE);
+	/*
+	 * Only flat tables are pruned, so the key of a legacy one is enough.
+	 * Not so for an unconfigured table: pruning may have emptied it.
+	 */
+	if (ddt->ddt_version == DDT_VERSION_LEGACY) {
+		if (max_class == DDT_CLASS_UNIQUE)
+			return (B_TRUE);
+
+		for (ddt_type_t type = 0; type < DDT_TYPES; type++) {
+			for (ddt_class_t class = 0; class <= max_class;
+			    class++) {
+				if (ddt_object_contains(ddt, type, class,
+				    &ddk) == 0)
+					return (B_TRUE);
+			}
 		}
+		return (B_FALSE);
 	}
 
-	return (B_FALSE);
+	dde = ddt_alloc(ddt, &ddk);
+
+	for (ddt_type_t type = 0; type < DDT_TYPES; type++) {
+		for (ddt_class_t class = 0; class <= max_class; class++) {
+			if (ddt_object_lookup(ddt, type, class, dde) == 0) {
+				found = (ddt_phys_select(ddt, dde, bp) !=
+				    DDT_PHYS_NONE);
+				goto out;
+			}
+		}
+	}
+out:
+	ddt_free(ddt, dde);
+	return (found);
 }
 
 ddt_entry_t *
@@ -1946,13 +1980,23 @@ ddt_repair_done(ddt_t *ddt, ddt_entry_t *dde)
 	ddt_exit(ddt);
 }
 
+/*
+ * The repair zio is a null zio with no bp, so the ddt can't be recovered from
+ * it in the done callback (ddt_select() needs a bp); carry it alongside the
+ * entry, which ddt_free() needs to find the entry's size and cache.
+ */
+typedef struct ddt_repair_ctx {
+	ddt_t		*drc_ddt;
+	ddt_entry_t	*drc_rdde;
+} ddt_repair_ctx_t;
+
 static void
 ddt_repair_entry_done(zio_t *zio)
 {
-	ddt_t *ddt = ddt_select(zio->io_spa, zio->io_bp);
-	ddt_entry_t *rdde = zio->io_private;
+	ddt_repair_ctx_t *drc = zio->io_private;
 
-	ddt_free(ddt, rdde);
+	ddt_free(drc->drc_ddt, drc->drc_rdde);
+	kmem_free(drc, sizeof (ddt_repair_ctx_t));
 }
 
 static void
@@ -1960,11 +2004,16 @@ ddt_repair_entry(ddt_t *ddt, ddt_entry_t *dde, ddt_entry_t *rdde, zio_t *rio)
 {
 	ddt_key_t *ddk = &dde->dde_key;
 	ddt_key_t *rddk = &rdde->dde_key;
+	ddt_repair_ctx_t *drc;
 	zio_t *zio;
 	blkptr_t blk;
 
+	drc = kmem_alloc(sizeof (ddt_repair_ctx_t), KM_SLEEP);
+	drc->drc_ddt = ddt;
+	drc->drc_rdde = rdde;
+
 	zio = zio_null(rio, rio->io_spa, NULL,
-	    ddt_repair_entry_done, rdde, rio->io_flags);
+	    ddt_repair_entry_done, drc, rio->io_flags);
 
 	for (int p = 0; p < DDT_NPHYS(ddt); p++) {
 		ddt_univ_phys_t *ddp = dde->dde_phys;
@@ -2718,6 +2767,9 @@ typedef struct ddt_prune_entry {
 	ddt_univ_phys_t	dpe_phys[];
 } ddt_prune_entry_t;
 
+#define	DDT_PRUNE_ENTRY_SIZE	\
+	(sizeof (ddt_prune_entry_t) + DDT_FLAT_PHYS_SIZE)
+
 typedef struct ddt_prune_info {
 	spa_t		*dpi_spa;
 	uint64_t	dpi_txg_syncs;
@@ -2750,15 +2802,22 @@ prune_candidates_sync(void *arg, dmu_tx_t *tx)
 		 */
 		if (avl_find(&ddt->ddt_tree, &dpe->dpe_key, NULL)) {
 			ddt_exit(ddt);
-			kmem_free(dpe, sizeof (*dpe));
+			kmem_free(dpe, DDT_PRUNE_ENTRY_SIZE);
 			continue;
 		}
 
 		ddt_bp_create(ddt->ddt_checksum, &dpe->dpe_key,
 		    dpe->dpe_phys, DDT_PHYS_FLAT, &blk);
 
+		/*
+		 * The walk read this candidate from the unique-class store
+		 * object, which lags the log. If a log flush has since
+		 * rewritten the stored entry, it may have more references.
+		 */
 		ddt_entry_t *dde = ddt_lookup(ddt, &blk, B_TRUE);
-		if (dde != NULL && !(dde->dde_flags & DDE_FLAG_LOGGED)) {
+		if (dde != NULL && !(dde->dde_flags & DDE_FLAG_LOGGED) &&
+		    memcmp(&dde->dde_phys->ddp_flat, &dpe->dpe_phys->ddp_flat,
+		    DDT_FLAT_PHYS_SIZE) == 0) {
 			ASSERT(dde->dde_flags & DDE_FLAG_LOADED);
 			/*
 			 * Zero the physical, so we don't try to free DVAs
@@ -2770,7 +2829,7 @@ prune_candidates_sync(void *arg, dmu_tx_t *tx)
 		}
 
 		ddt_exit(ddt);
-		kmem_free(dpe, sizeof (*dpe));
+		kmem_free(dpe, DDT_PRUNE_ENTRY_SIZE);
 	}
 
 	spa_config_exit(dpi->dpi_spa, SCL_ZIO, FTAG);
@@ -2787,8 +2846,7 @@ ddt_prune_entry(list_t *list, ddt_t *ddt, const ddt_key_t *ddk,
 {
 	ASSERT(ddt->ddt_flags & DDT_FLAG_FLAT);
 
-	size_t dpe_size = sizeof (ddt_prune_entry_t) + DDT_FLAT_PHYS_SIZE;
-	ddt_prune_entry_t *dpe = kmem_alloc(dpe_size, KM_SLEEP);
+	ddt_prune_entry_t *dpe = kmem_alloc(DDT_PRUNE_ENTRY_SIZE, KM_SLEEP);
 
 	dpe->dpe_ddt = ddt;
 	dpe->dpe_key = *ddk;
@@ -2847,14 +2905,22 @@ ddt_prune_walk(spa_t *spa, uint64_t cutoff, ddt_age_histo_t *histogram)
 		    ddlwe.ddlwe_phys.ddp_flat.ddp_class_start;
 
 		/*
-		 * If this entry is on the log, then the stored entry is stale
-		 * and we should skip it.
+		 * A dedup write asking for more copies than its entry holds
+		 * extends the entry (see zio_ddt_write()), and the BPs written
+		 * before keep fewer DVAs. Pruning clears the entry without
+		 * freeing anything, so if its last reference is one of those
+		 * BPs, the DVAs that BP lacks would be leaked. An extended
+		 * entry cannot be told from one written with that many copies,
+		 * so leave every entry holding more than one DVA. A gang entry
+		 * is never extended.
 		 */
-		if (ddt_log_find_key(ddt, &ddlwe.ddlwe_key, NULL, NULL))
-			continue;
+		const ddt_univ_phys_t *ddp = &ddlwe.ddlwe_phys;
+		boolean_t prunable = ddt_phys_is_gang(ddp, DDT_PHYS_FLAT) ||
+		    ddt_phys_dva_count(ddp, DDT_PHYS_FLAT,
+		    DDK_GET_CRYPT(&ddlwe.ddlwe_key)) <= 1;
 
 		/* prune older entries */
-		if (pruning && class_start < cutoff) {
+		if (pruning && prunable && class_start < cutoff) {
 			if (candidates++ >= zfs_ddt_prunes_per_txg) {
 				/* sync prune candidates in batches */
 				VERIFY0(dsl_sync_task(spa_name(spa),
@@ -2868,7 +2934,8 @@ ddt_prune_walk(spa_t *spa, uint64_t cutoff, ddt_age_histo_t *histogram)
 
 		/* build a histogram */
 		if (histogram != NULL) {
-			uint64_t age = (now - class_start) / 3600;
+			uint64_t age = (class_start < now) ?
+			    (now - class_start) / 3600 : 0;
 			int bin = MIN(highbit64(age), HIST_BINS - 1);
 			histogram->dah_entries++;
 			histogram->dah_age_histo[bin]++;
@@ -2922,15 +2989,17 @@ ddt_prune_unique_entries(spa_t *spa, zpool_ddt_prune_unit_t unit,
 	zfs_dbgmsg("prune %llu %s", (u_longlong_t)amount,
 	    unit == ZPOOL_DDT_PRUNE_PERCENTAGE ? "%" : "seconds old or older");
 
+	uint64_t now = gethrestime_sec();
 	if (unit == ZPOOL_DDT_PRUNE_PERCENTAGE) {
 		ddt_age_histo_t histogram;
 		uint64_t oldest = 0;
-		uint64_t now = gethrestime_sec();
 
 		/* Make a pass over DDT to build a histogram */
 		ddt_prune_walk(spa, 0, &histogram);
 
 		uint64_t target = (histogram.dah_entries * amount) / 100;
+		if (target == 0)
+			goto out;
 
 		/*
 		 * Figure out our cutoff date
@@ -2952,9 +3021,11 @@ ddt_prune_unique_entries(spa_t *spa, zpool_ddt_prune_unit_t unit,
 		if (ddt_dump_prune_histogram)
 			ddt_dump_age_histogram(&histogram, cutoff);
 	} else if (unit == ZPOOL_DDT_PRUNE_AGE) {
-		cutoff = gethrestime_sec() - amount;
+		if (amount >= now)
+			return (SET_ERROR(EINVAL));
+		cutoff = now - amount;
 	} else {
-		return (EINVAL);
+		return (SET_ERROR(EINVAL));
 	}
 
 	if (cutoff > 0 && !spa_shutting_down(spa) && !issig()) {
@@ -2962,6 +3033,7 @@ ddt_prune_unique_entries(spa_t *spa, zpool_ddt_prune_unit_t unit,
 		ddt_prune_walk(spa, cutoff, NULL);
 	}
 
+out:
 	zfs_dbgmsg("%s: prune completed in %llu ms",
 	    spa_name(spa), (u_longlong_t)NSEC2MSEC(gethrtime() - start_time));
 

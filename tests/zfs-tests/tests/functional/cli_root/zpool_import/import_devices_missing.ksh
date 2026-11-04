@@ -9,7 +9,7 @@
 #
 # A full copy of the text of the CDDL should have accompanied this
 # source.  A copy of the CDDL is also available via the Internet at
-# http://www.illumos.org/license/CDDL.
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -86,7 +86,7 @@ function test_devices_missing
 	    "get suspended."
 	verify_data_hashsums $MD5FILE >/dev/null 2>&1
 
-	log_must_busy zpool export $TESTPOOL1
+	log_must zpool export $TESTPOOL1
 
 	typeset newpaths=$(echo "$missingvdevs" | \
 		sed "s:$DEVICE_DIR:$BACKUP_DEVICE_DIR:g")

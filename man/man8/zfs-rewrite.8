@@ -1,28 +1,18 @@
 .\" SPDX-License-Identifier: CDDL-1.0
 .\"
-.\" CDDL HEADER START
+.\" This file and its contents are supplied under the terms of the
+.\" Common Development and Distribution License ("CDDL"), version 1.0.
+.\" You may only use this file in accordance with the terms of version
+.\" 1.0 of the CDDL.
 .\"
-.\" The contents of this file are subject to the terms of the
-.\" Common Development and Distribution License (the "License").
-.\" You may not use this file except in compliance with the License.
-.\"
-.\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or https://opensource.org/licenses/CDDL-1.0.
-.\" See the License for the specific language governing permissions
-.\" and limitations under the License.
-.\"
-.\" When distributing Covered Code, include this CDDL HEADER in each
-.\" file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-.\" If applicable, add the following below this CDDL HEADER, with the
-.\" fields enclosed by brackets "[]" replaced with your own identifying
-.\" information: Portions Copyright [yyyy] [name of copyright owner]
-.\"
-.\" CDDL HEADER END
+.\" A full copy of the text of the CDDL should have accompanied this
+.\" source.  A copy of the CDDL is also available via the Internet at
+.\" https://opensource.org/license/CDDL-1.0.
 .\"
 .\" Copyright (c) 2025 iXsystems, Inc.
 .\" Copyright (c) 2025, Klara, Inc.
 .\"
-.Dd November 5, 2025
+.Dd October 28, 2026
 .Dt ZFS-REWRITE 8
 .Os
 .
@@ -32,7 +22,7 @@
 .Sh SYNOPSIS
 .Nm zfs
 .Cm rewrite
-.Oo Fl CPSrvx Ns Oc
+.Oo Fl CPSWrvx Ns Oc
 .Op Fl l Ar length
 .Op Fl o Ar offset
 .Ar file Ns | Ns Ar directory Ns …
@@ -56,6 +46,10 @@ By default, rewrite updates logical birth times, making blocks appear
 as modified in snapshots and incremental send streams.
 Physical rewrite preserves logical birth times, avoiding unnecessary
 inclusion in incremental streams.
+Raw incremental streams of encrypted datasets, sent with
+.Nm zfs Cm send Fl w ,
+still include the rewritten blocks, since rewriting an encrypted block
+gives it a new IV and MAC.
 Physical rewrite requires the
 .Sy physical_rewrite
 feature to be enabled on the pool.
@@ -65,6 +59,18 @@ Blocks created before the most recent snapshot are shared with that snapshot.
 Rewriting these blocks would create new copies, leaving the old copies for
 the snapshot and increasing space usage.
 This flag prevents such expansion by skipping snapshot-shared blocks.
+.It Fl W
+Skip blocks whose rewrite would not change their allocated size.
+After a RAID-Z expansion, only the blocks written before it completed that the
+new width stores in less space are rewritten, so an interrupted rewrite can be
+run again without rewriting the same blocks twice.
+Blocks smaller than the old width keep their size and stay in place, which can
+leave the space freed around them fragmented.
+A size change that a property change would cause, as with
+.Sy compression ,
+is not taken into account.
+On vdevs other than RAID-Z, only gang blocks and blocks on removed devices
+are rewritten.
 .It Fl l Ar length
 Rewrite at most this number of bytes.
 .It Fl o Ar offset
@@ -102,6 +108,12 @@ this expansion.
 Holes that were never written or were previously zero-compressed are
 not rewritten and will remain holes even if compression is disabled.
 .Pp
+On a RAID-Z vdev, rewritten blocks use the width of the vdev once its
+expansion has completed, see
+.Xr zpool-attach 8 .
+Blocks rewritten while the expansion is in progress keep their old width.
+Blocks that are already deduplicated stay where they are, and keep their width.
+.Pp
 If a
 .Fl l
 or
@@ -120,4 +132,5 @@ there are no user data changes.
 .
 .Sh SEE ALSO
 .Xr zfsprops 7 ,
-.Xr zpool-features 7
+.Xr zpool-features 7 ,
+.Xr zpool-attach 8

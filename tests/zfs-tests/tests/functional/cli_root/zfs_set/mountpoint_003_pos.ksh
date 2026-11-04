@@ -1,24 +1,14 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -50,8 +40,9 @@ function cleanup
 {
 	ismounted $tmpmnt && log_must umount $tmpmnt
 	[[ -d $tmpmnt ]] && log_must rm -rf $tmpmnt
-	[[ -n $oldmpt ]] && log_must zfs set mountpoint=$oldmpt $testfs
-	! ismounted $oldmpt && log_must zfs mount $testfs
+	if datasetexists $testfs; then
+		log_must zfs destroy $testfs
+	fi
 }
 
 log_assert "With legacy mount, FSType-specific option works well."
@@ -98,10 +89,9 @@ fi
 
 tmpmnt=/tmpmnt.$$
 [[ -d $tmpmnt ]] && rm -rf $tmpmnt
-testfs=$TESTPOOL/$TESTFS
+testfs=$TESTPOOL/$TESTFS.$$
 log_must mkdir $tmpmnt
-oldmpt=$(get_prop mountpoint $testfs)
-log_must zfs set mountpoint=legacy $testfs
+log_must zfs create -o mountpoint=legacy $testfs
 
 typeset i=0
 while ((i < ${#args[@]})); do
@@ -110,8 +100,8 @@ while ((i < ${#args[@]})); do
 		
 		msg=$(mount | grep "$tmpmnt ")
 
-		if ! echo $msg | grep -q "${args[((i))]}"; then
-			if echo $msg | grep -q "${args[((i-1))]}"; then
+		if ! echo $msg | grep -qw "${args[((i))]}"; then
+			if echo $msg | grep -qw "${args[((i^1))]}"; then
 				log_fail "Expected option: ${args[((i))]} \n" \
 					 "Real option: $msg"
 			fi

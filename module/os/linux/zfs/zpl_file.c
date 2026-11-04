@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2011, Lawrence Livermore National Security, LLC.
@@ -46,6 +36,58 @@
 #ifdef HAVE_FILELOCK_HEADER
 #include <linux/filelock.h>
 #endif
+
+/*
+ * Per-open-file state, hung off file->private_data.  zpl_file_data_get()
+ * allocates it the first time one of the flags below is set, and a flag
+ * stays set until the handle is released.
+ *
+ * zfd_dio_read_declined: a Direct I/O read on this handle hit a benign
+ * checksum verify failure, a recycled O_DIRECT buffer whose buffered re-read
+ * then succeeded.  zpl_iter_read sends later reads through the uncached
+ * buffered path.  That stops the verify-failure and re-read storm without
+ * disabling the verify itself, so mirror and raidz self-heal for genuine
+ * corruption still runs.
+ *
+ * zfd_dio_write_bounce: a Direct I/O write on this handle failed its
+ * checksum verify because the caller changed the buffer while the write was
+ * in flight.  zpl_iter_write has later Direct I/O writes issued from a
+ * private copy of the data, so the checksum covers the bytes written.
+ */
+typedef struct zpl_file_data {
+	boolean_t	zfd_dio_read_declined;
+	boolean_t	zfd_dio_write_bounce;
+} zpl_file_data_t;
+
+static zpl_file_data_t *
+zpl_file_data_get(struct file *filp)
+{
+	zpl_file_data_t *zfd = atomic_load_ptr(&filp->private_data);
+	if (zfd != NULL)
+		return (zfd);
+
+	zfd = kmem_zalloc(sizeof (*zfd), KM_SLEEP);
+	zpl_file_data_t *old = atomic_cas_ptr(&filp->private_data, NULL, zfd);
+	if (old == NULL)
+		return (zfd);
+
+	kmem_free(zfd, sizeof (*zfd));
+	return (old);
+}
+
+static void
+zpl_dio_read_decline(struct file *filp)
+{
+	zpl_file_data_t *zfd = zpl_file_data_get(filp);
+	atomic_store_32(&zfd->zfd_dio_read_declined, B_TRUE);
+}
+
+static void
+zpl_dio_write_bounce(struct file *filp)
+{
+	zpl_file_data_t *zfd = zpl_file_data_get(filp);
+	atomic_store_32(&zfd->zfd_dio_write_bounce, B_TRUE);
+}
 
 /*
  * When using fallocate(2) to preallocate space, inflate the requested
@@ -90,6 +132,12 @@ zpl_release(struct inode *ip, struct file *filp)
 	spl_fstrans_unmark(cookie);
 	crfree(cr);
 	ASSERT3S(error, <=, 0);
+
+	zpl_file_data_t *zfd = filp->private_data;
+	if (zfd != NULL) {
+		filp->private_data = NULL;
+		kmem_free(zfd, sizeof (*zfd));
+	}
 
 	return (error);
 }
@@ -191,6 +239,26 @@ zfs_io_flags(struct kiocb *kiocb)
 	return (flags);
 }
 
+static inline uint16_t
+zfs_uio_flags(struct kiocb *kiocb)
+{
+	uint16_t flags = 0;
+
+	/*
+	 * Both RWF_DONTCACHE and POSIX_FADV_NOREUSE say the caller does not
+	 * intend to read the data after this.
+	 */
+#if defined(IOCB_DONTCACHE)
+	if (kiocb->ki_flags & IOCB_DONTCACHE)
+		flags |= UIO_UNCACHED;
+#endif
+#if defined(FMODE_NOREUSE)
+	if (kiocb->ki_filp->f_mode & FMODE_NOREUSE)
+		flags |= UIO_UNCACHED;
+#endif
+	return (flags);
+}
+
 /*
  * If relatime is enabled, call file_accessed() if zfs_relatime_need_update()
  * is true.  This is needed since datasets with inherited "relatime" property
@@ -221,6 +289,15 @@ zpl_iter_read(struct kiocb *kiocb, struct iov_iter *to)
 	zfs_uio_t uio;
 
 	zfs_uio_iov_iter_init(&uio, to, kiocb->ki_pos, count);
+	uio.uio_extflg |= zfs_uio_flags(kiocb);
+
+	/*
+	 * This handle previously declined Direct I/O after a benign read
+	 * verify failure; keep taking the uncached buffered path.
+	 */
+	zpl_file_data_t *zfd = atomic_load_ptr(&filp->private_data);
+	if (zfd != NULL && atomic_load_32(&zfd->zfd_dio_read_declined))
+		uio.uio_extflg |= UIO_DIO_DENY;
 
 	crhold(cr);
 	cookie = spl_fstrans_mark();
@@ -230,6 +307,14 @@ zpl_iter_read(struct kiocb *kiocb, struct iov_iter *to)
 
 	spl_fstrans_unmark(cookie);
 	crfree(cr);
+
+	/*
+	 * A Direct I/O read verify failed benignly (recycled O_DIRECT buffer)
+	 * and the buffered re-read succeeded; decline Direct I/O reads on this
+	 * handle from here on.
+	 */
+	if (uio.uio_extflg & UIO_DIO_CKSUM_RETRIED)
+		zpl_dio_read_decline(filp);
 
 	if (ret < 0)
 		return (ret);
@@ -271,6 +356,15 @@ zpl_iter_write(struct kiocb *kiocb, struct iov_iter *from)
 		return (ret);
 
 	zfs_uio_iov_iter_init(&uio, from, kiocb->ki_pos, count);
+	uio.uio_extflg |= zfs_uio_flags(kiocb);
+
+	/*
+	 * A Direct I/O write on this handle already failed its checksum
+	 * verify; keep writing from a private copy of the data.
+	 */
+	zpl_file_data_t *zfd = atomic_load_ptr(&filp->private_data);
+	if (zfd != NULL && atomic_load_32(&zfd->zfd_dio_write_bounce))
+		uio.uio_extflg |= UIO_DIO_BOUNCE;
 
 	crhold(cr);
 	cookie = spl_fstrans_mark();
@@ -280,6 +374,14 @@ zpl_iter_write(struct kiocb *kiocb, struct iov_iter *from)
 
 	spl_fstrans_unmark(cookie);
 	crfree(cr);
+
+	/*
+	 * A Direct I/O write failed its checksum verify because the caller
+	 * changed the buffer in flight.  Copy the data for every later
+	 * Direct I/O write on this handle.
+	 */
+	if (uio.uio_extflg & UIO_DIO_CKSUM_RETRIED)
+		zpl_dio_write_bounce(filp);
 
 	if (ret < 0)
 		return (ret);
@@ -1183,12 +1285,58 @@ zpl_ioctl_rewrite(struct file *filp, void __user *arg)
 	return (err);
 }
 
+#ifndef HAVE_SUPER_SET_UUID
+/*
+ * Linux 6.9 added FS_IOC_GETFSUUID, together with super_set_uuid(), and
+ * serves the ioctl in the VFS, from sb->s_uuid, before it calls the
+ * ioctl handler of the filesystem.  On older kernels ZFS must serve the
+ * ioctl itself, from the same field, which zfs_domount() sets, unless
+ * the field is null (zfs_sb_uuid=0).  The headers of those kernels do
+ * not have the definitions, so supply them here.
+ *
+ * The handler covers the files and directories of the filesystem.  The
+ * .zfs control directory has its own file operations without an ioctl
+ * handler, so the ioctl fails with ENOTTY there, where the VFS of newer
+ * kernels serves it.
+ */
+#ifndef FS_IOC_GETFSUUID
+struct fsuuid2 {
+	__u8	len;
+	__u8	uuid[16];
+};
+
+#define	FS_IOC_GETFSUUID	_IOR(0x15, 0, struct fsuuid2)
+#endif
+
+static int
+zpl_ioctl_getfsuuid(struct file *filp, void __user *arg)
+{
+	struct super_block *sb = file_inode(filp)->i_sb;
+	struct fsuuid2 fu = { .len = sizeof (sb->s_uuid) };
+
+	/* No UUID (zfs_sb_uuid=0): fail like the VFS of newer kernels. */
+	if (uuid_is_null(&sb->s_uuid))
+		return (-ENOTTY);
+
+	memcpy(fu.uuid, &sb->s_uuid, sizeof (sb->s_uuid));
+
+	if (copy_to_user(arg, &fu, sizeof (fu)))
+		return (-EFAULT);
+
+	return (0);
+}
+#endif /* !HAVE_SUPER_SET_UUID */
+
 static long
 zpl_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
 	case FS_IOC_GETVERSION:
 		return (zpl_ioctl_getversion(filp, (void *)arg));
+#ifndef HAVE_SUPER_SET_UUID
+	case FS_IOC_GETFSUUID:
+		return (zpl_ioctl_getfsuuid(filp, (void *)arg));
+#endif
 	case FS_IOC_GETFLAGS:
 		return (zpl_ioctl_getflags(filp, (void *)arg));
 	case FS_IOC_SETFLAGS:
@@ -1222,6 +1370,11 @@ zpl_compat_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case FS_IOC32_SETFLAGS:
 		cmd = FS_IOC_SETFLAGS;
 		break;
+#ifndef HAVE_SUPER_SET_UUID
+	case FS_IOC_GETFSUUID:
+		/* The ioctl is the same in 32-bit and 64-bit mode. */
+		break;
+#endif
 	default:
 		return (-ENOTTY);
 	}
@@ -1285,6 +1438,21 @@ const struct file_operations zpl_file_operations = {
 	.dedupe_file_range	= zpl_dedupe_file_range,
 #endif
 	.fadvise	= zpl_fadvise,
+#ifdef HAVE_VFS_FOP_FLAGS
+	.fop_flags	=
+#ifdef FOP_DIO_PARALLEL_WRITE
+	/*
+	 * Writes are serialized by the znode's own per-range lock rather
+	 * than by i_rwsem, so non-overlapping O_DIRECT writes need no
+	 * further serialization from the VFS or from io_uring.
+	 */
+	    FOP_DIO_PARALLEL_WRITE |
+#endif
+#ifdef FOP_DONTCACHE
+	    FOP_DONTCACHE |
+#endif
+	    0,
+#endif
 	.unlocked_ioctl	= zpl_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl	= zpl_compat_ioctl,

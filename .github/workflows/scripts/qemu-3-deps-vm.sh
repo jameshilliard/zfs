@@ -14,25 +14,41 @@
 set -eu
 
 function alpine() {
+  echo "##[group]Shrink the initramfs"
+  # /boot is a small FAT partition, "kms" makes the initramfs too big.
+  sudo sed -i 's/ kms / /' /etc/mkinitfs/mkinitfs.conf
+  echo "##[endgroup]"
+
   echo "##[group]Install Development Tools"
   sudo apk add \
     acl alpine-sdk attr autoconf automake bash build-base clang22 coreutils \
-    cpio cryptsetup curl curl-dev dhcpcd eudev eudev-dev eudev-libs findutils \
-    fio gawk gdb gettext-dev git grep jq libaio libaio-dev libcurl \
-    libtirpc-dev libtool libunwind libunwind-dev linux-headers linux-tools \
-    linux-virt linux-virt-dev lsscsi m4 make nfs-utils openssl-dev parted \
-    pax procps py3-cffi py3-distlib py3-packaging py3-setuptools python3 \
-    python3-dev qemu-guest-agent rng-tools rsync samba samba-server sed \
-    strace sysstat util-linux util-linux-dev wget words xfsprogs xxhash \
-    zlib-dev pamtester@testing
+    cpio cryptsetup curl curl-dev dhcpcd diffutils eudev eudev-dev eudev-libs \
+    findutils fio gawk gdb gettext-dev git grep jq libaio libaio-dev \
+    libcap-utils libcurl libtirpc-dev libtool libunwind libunwind-dev \
+    linux-headers linux-pam-dev linux-tools linux-stable linux-stable-dev \
+    lsscsi m4 make \
+    nfs-utils openssl-dev parted pax procps py3-cffi py3-distlib py3-packaging \
+    py3-setuptools python3 python3-dev qemu-guest-agent rng-tools rsync samba \
+    samba-server sed strace sysstat tzdata util-linux util-linux-dev wget \
+    words xfsprogs xxhash zlib-dev pamtester@testing
   echo "##[endgroup]"
 
   echo "##[group]Switch to eudev"
   sudo setup-devd udev
   echo "##[endgroup]"
 
+  echo "##[group]Boot the -stable kernel instead of -virt"
+  # -virt lacks CONFIG_SCSI_DEBUG, which several ZTS tests need.  Takes
+  # effect on the next boot, after this step powers off.  Limine has a
+  # static entry and no kernel hooks, so edit it.
+  sudo sed -i -e 's#/vmlinuz-virt#/vmlinuz-stable#' \
+    -e 's#/initramfs-virt#/initramfs-stable#' /boot/limine/limine.conf
+  echo "##[endgroup]"
+
   echo "##[group]Install ksh93 from Source"
-  git clone --depth 1 https://github.com/ksh93/ksh.git /tmp/ksh
+  # Build the actively-maintained "1.0" branch instead of the
+  # default "dev" branch for a reproducible, stable build.
+  git clone --depth 1 --branch 1.0 https://github.com/ksh93/ksh.git /tmp/ksh
   cd /tmp/ksh
   ./bin/package make
   sudo ./bin/package install /
@@ -218,8 +234,11 @@ case "$1" in
   ubuntu22|ubuntu24)
     debian
     echo "##[group]Install Ubuntu specific"
-    sudo apt-get install -yq linux-tools-common libtirpc-dev \
-      linux-modules-extra-$(uname -r)
+    sudo apt-get install -yq linux-tools-common libtirpc-dev
+    # The runners (ONLY_DEPS) do not need linux-modules-extra
+    if [ -z "${ONLY_DEPS:-}" ] ; then
+      sudo apt-get install -yq linux-modules-extra-$(uname -r)
+    fi
     sudo apt-get install -yq dh-sequence-dkms
 
     # Need 'build-essential' explicitly for ARM builder
@@ -265,8 +284,8 @@ case "$1" in
     sudo -E rc-update add qemu-guest-agent
     sudo -E rc-update add nfs
     sudo -E rc-update add samba
-    sudo -E rc-update add dhcpcd
     # Remove services related to cloud-init.
+    sudo -E rc-update del cloud-init-local boot
     sudo -E rc-update del cloud-init default
     sudo -E rc-update del cloud-final default
     sudo -E rc-update del cloud-config default
@@ -323,6 +342,12 @@ case "$1" in
     CMDLINE="$CMDLINE biosdevname=0 net.ifnames=0"
     echo 'GRUB_SERIAL_COMMAND="serial --speed=115200"' \
       | sudo tee -a /etc/default/grub >/dev/null
+    # Force GRUB itself onto the serial console.  These VMs have no display,
+    # and without this grub2-mkconfig can emit 'terminal_output gfxterm',
+    # which leaves GRUB stuck before the kernel starts on a headless VM.
+    sudo sed -i -e '/^GRUB_TERMINAL_INPUT/d' -e '/^GRUB_TERMINAL_OUTPUT/d' /etc/default/grub
+    echo 'GRUB_TERMINAL_INPUT="serial console"' | sudo tee -a /etc/default/grub >/dev/null
+    echo 'GRUB_TERMINAL_OUTPUT="serial console"' | sudo tee -a /etc/default/grub >/dev/null
     ;;
   ubuntu24|ubuntu26)
     GRUB_CFG="/boot/grub/grub.cfg"
@@ -337,7 +362,16 @@ case "$1" in
 esac
 
 case "$1" in
-  alpine*|archlinux|freebsd*)
+  alpine*)
+    # kmemleak on and CPU mitigations off by default. The -nokmemleak
+    # and -mitigations suffixes keep the kernel's defaults instead.
+    kmemleak=on mitigations=off
+    [[ "$1" == *-nokmemleak* ]] && kmemleak=off
+    [[ "$1" == *-mitigations* ]] && mitigations=auto
+    opts="kmemleak=$kmemleak mitigations=$mitigations"
+    sudo sed -i "/^\s*cmdline:/s/\$/ $opts/" /boot/limine/limine.conf
+    ;;
+  archlinux|freebsd*)
     true
     ;;
   *)

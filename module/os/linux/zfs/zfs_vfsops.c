@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -30,6 +20,7 @@
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/sysmacros.h>
+#include <sys/byteorder.h>
 #include <sys/kmem.h>
 #include <sys/pathname.h>
 #include <sys/vnode.h>
@@ -985,15 +976,33 @@ zfs_statvfs(struct inode *ip, struct kstatfs *statp)
 	znode_t *zp = ITOZ(ip);
 	zfsvfs_t *zfsvfs = ITOZSB(ip);
 	uint64_t refdbytes, availbytes, usedobjs, availobjs;
+	uint64_t fsid;
 	int err = 0;
 
-	if ((err = zfs_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
+	/*
+	 * Control directory inodes have no SA handle.  They report the
+	 * containing filesystem, except that a '.zfs/snapshot/<name>' entry
+	 * reports its snapshot's fsid, so the snapshot can be identified
+	 * without mounting it (O_PATH + fstatfs()).
+	 */
+	if (zfsctl_is_node(ip))
+		err = zfs_enter(zfsvfs, FTAG);
+	else
+		err = zfs_enter_verify_zp(zfsvfs, zp, FTAG);
+	if (err != 0)
 		return (err);
+
+	if (zfsctl_is_snapdir(ip)) {
+		if ((err = zfsctl_snapdir_fsid(ip, &fsid)) != 0) {
+			zfs_exit(zfsvfs, FTAG);
+			return (err);
+		}
+	} else {
+		fsid = dmu_objset_fsid_guid(zfsvfs->z_os);
+	}
 
 	dmu_objset_space(zfsvfs->z_os,
 	    &refdbytes, &availbytes, &usedobjs, &availobjs);
-
-	uint64_t fsid = dmu_objset_fsid_guid(zfsvfs->z_os);
 	/*
 	 * The underlying storage pool actually uses multiple block
 	 * size.  Under Solaris frsize (fragment size) is reported as
@@ -1041,7 +1050,9 @@ zfs_statvfs(struct inode *ip, struct kstatfs *statp)
 	 */
 	memset(statp->f_spare, 0, sizeof (statp->f_spare));
 
-	if (dmu_objset_projectquota_enabled(zfsvfs->z_os) &&
+	/* control directory inodes have no project id */
+	if (!zfsctl_is_node(ip) &&
+	    dmu_objset_projectquota_enabled(zfsvfs->z_os) &&
 	    dmu_objset_projectquota_present(zfsvfs->z_os)) {
 		if (zp->z_pflags & ZFS_PROJINHERIT && zp->z_projid &&
 		    zpl_is_valid_projid(zp->z_projid))
@@ -1137,6 +1148,36 @@ zfs_prune_aliases(zfsvfs_t *zfsvfs, unsigned long nr_to_scan)
 #define	S_SHRINK(sb)	((sb)->s_shrink)
 #endif
 
+/*
+ * Call the superblock shrinker in batches of shrinker->batch objects, the
+ * same way the kernel's do_shrink_slab() does.  A single scan_objects() call
+ * marks every inode it isolates I_FREEING before evicting them one at a time,
+ * so a prune of millions of objects would leave lookups of any of those
+ * inodes retrying in zfs_zget() until the whole list has been evicted.
+ */
+static int
+zfs_prune_batched(struct shrinker *shrinker, struct shrink_control *sc,
+    unsigned long nr_to_scan)
+{
+	unsigned long batch = shrinker->batch > 0 ? shrinker->batch : 128;
+	int objects = 0;
+
+	while (nr_to_scan > 0) {
+		unsigned long nr = MIN(nr_to_scan, batch);
+		unsigned long freed;
+
+		sc->nr_to_scan = nr;
+		freed = (*shrinker->scan_objects)(shrinker, sc);
+		if (freed == SHRINK_STOP)
+			break;
+		objects += freed;
+		nr_to_scan -= nr;
+		cond_resched();
+	}
+
+	return (objects);
+}
+
 int
 zfs_prune(struct super_block *sb, unsigned long nr_to_scan, int *objects)
 {
@@ -1167,14 +1208,14 @@ zfs_prune(struct super_block *sb, unsigned long nr_to_scan, int *objects)
 				continue;
 			if (c > tc)
 				tc = c;
-			sc.nr_to_scan = mult_frac(nr_to_scan, c, tc) + 1;
-			*objects += (*shrinker->scan_objects)(shrinker, &sc);
+			*objects += zfs_prune_batched(shrinker, &sc,
+			    mult_frac(nr_to_scan, c, tc) + 1);
 		}
 	} else {
-			*objects = (*shrinker->scan_objects)(shrinker, &sc);
+		*objects = zfs_prune_batched(shrinker, &sc, nr_to_scan);
 	}
 #else
-	*objects = (*shrinker->scan_objects)(shrinker, &sc);
+	*objects = zfs_prune_batched(shrinker, &sc, nr_to_scan);
 #endif
 
 	/*
@@ -1343,6 +1384,46 @@ zfsvfs_teardown(zfsvfs_t *zfsvfs, boolean_t unmounting)
 
 static atomic_long_t zfs_bdi_seq = ATOMIC_LONG_INIT(0);
 
+/*
+ * Set sb->s_uuid at mount time; see zfs_set_sb_uuid().  A value of 0
+ * leaves it null, as releases without the UUID did.
+ */
+static int zfs_sb_uuid = 1;
+
+/*
+ * Set the 128-bit UUID of this superblock: the 64-bit pool guid, then
+ * the 64-bit dataset guid, both big-endian, so that the two hex halves
+ * of the UUID show the same numbers as "zpool get guid" and "zfs get
+ * guid".  The result is not a valid RFC 4122 UUID, because the version
+ * and variant bits hold guid data; the kernel treats sb->s_uuid as an
+ * opaque byte string, and vfat stores a plain 4-byte volume serial the
+ * same way.  zfsprops(7) documents the UUID and its consumers.
+ *
+ * The UUID stays constant while the filesystem is mounted; a "zpool
+ * reguid" shows in it at the next mount.  It is unrelated to the
+ * statfs() f_fsid, which comes from the runtime-unique objset fsid guid.
+ */
+static void
+zfs_set_sb_uuid(struct super_block *sb, objset_t *os)
+{
+	uint64_t guids[2];
+
+	_Static_assert(sizeof (guids) == sizeof (sb->s_uuid),
+	    "the pool and dataset guids must fill sb->s_uuid exactly");
+
+	if (!zfs_sb_uuid)
+		return;
+
+	guids[0] = BE_64(spa_guid(dmu_objset_spa(os)));
+	guids[1] = BE_64(dsl_get_guid(dmu_objset_ds(os)));
+
+#ifdef HAVE_SUPER_SET_UUID
+	super_set_uuid(sb, (uint8_t *)guids, sizeof (guids));
+#else
+	memcpy(&sb->s_uuid, guids, sizeof (guids));
+#endif
+}
+
 int
 zfs_domount(struct super_block *sb, const char *osname,
     vfs_t *vfs, int silent)
@@ -1389,6 +1470,7 @@ zfs_domount(struct super_block *sb, const char *osname,
 	sb->s_time_gran = 1;
 	sb->s_blocksize = recordsize;
 	sb->s_blocksize_bits = ilog2(recordsize);
+	zfs_set_sb_uuid(sb, zfsvfs->z_os);
 
 	error = -super_setup_bdi_name(sb, "%.28s-%ld", "zfs",
 	    atomic_long_inc_return(&zfs_bdi_seq));
@@ -1426,7 +1508,7 @@ zfs_domount(struct super_block *sb, const char *osname,
 		acltype_changed_cb(zfsvfs, pval);
 		zfsvfs->z_issnap = B_TRUE;
 		zfsvfs->z_os->os_sync = ZFS_SYNC_DISABLED;
-		zfsvfs->z_snap_defer_time = jiffies;
+		zfsvfs->z_snap_atime = jiffies;
 
 		mutex_enter(&zfsvfs->z_os->os_user_ptr_lock);
 		dmu_objset_set_user(zfsvfs->z_os, zfsvfs);
@@ -1439,6 +1521,8 @@ zfs_domount(struct super_block *sb, const char *osname,
 	/* Allocate a root inode for the filesystem. */
 	error = zfs_root(zfsvfs, &root_inode);
 	if (error) {
+		/* Caller still owns vfs_t; detach before zfs_umount(). */
+		zfsvfs->z_vfs = NULL;
 		(void) zfs_umount(sb);
 		zfsvfs = NULL; /* avoid double-free; first in zfs_umount */
 		goto out;
@@ -1447,6 +1531,8 @@ zfs_domount(struct super_block *sb, const char *osname,
 	/* Allocate a root dentry for the filesystem */
 	sb->s_root = d_make_root(root_inode);
 	if (sb->s_root == NULL) {
+		/* Caller still owns vfs_t; detach before zfs_umount(). */
+		zfsvfs->z_vfs = NULL;
 		(void) zfs_umount(sb);
 		zfsvfs = NULL; /* avoid double-free; first in zfs_umount */
 		error = SET_ERROR(ENOMEM);
@@ -1639,13 +1725,18 @@ zfs_vget(struct super_block *sb, struct inode **ipp, fid_t *fidp)
 	/* A zero fid_gen means we are in the .zfs control directories */
 	if (fid_gen == 0 &&
 	    (object == ZFSCTL_INO_ROOT || object == ZFSCTL_INO_SNAPDIR)) {
-		if (zfsvfs->z_show_ctldir == ZFS_SNAPDIR_DISABLED) {
+		/*
+		 * Snapshots have no .zfs directory of their own, so there
+		 * is no z_ctldir to return even though z_show_ctldir keeps
+		 * its default value.
+		 */
+		if (zfsvfs->z_show_ctldir == ZFS_SNAPDIR_DISABLED ||
+		    zfsvfs->z_ctldir == NULL) {
 			zfs_exit(zfsvfs, FTAG);
 			return (SET_ERROR(ENOENT));
 		}
 
 		*ipp = zfsvfs->z_ctldir;
-		ASSERT(*ipp != NULL);
 
 		if (object == ZFSCTL_INO_SNAPDIR) {
 			VERIFY0(zfsctl_root_lookup(*ipp, "snapshot", ipp,
@@ -1879,22 +1970,16 @@ zfs_end_fs(zfsvfs_t *zfsvfs, dsl_dataset_t *ds)
 }
 
 /*
- * Automounted snapshots rely on periodic revalidation
- * to defer snapshots from being automatically unmounted.
+ * Bump data access time on automounted snapshots to stop them being expired
+ * out too early.
  */
-
 inline void
 zfs_exit_fs(zfsvfs_t *zfsvfs)
 {
 	if (!zfsvfs->z_issnap)
 		return;
 
-	if (time_after(jiffies, zfsvfs->z_snap_defer_time +
-	    MAX(zfs_expire_snapshot * HZ / 2, HZ))) {
-		zfsvfs->z_snap_defer_time = jiffies;
-		zfsctl_snapshot_unmount_delay(dmu_objset_spa(zfsvfs->z_os),
-		    dmu_objset_id(zfsvfs->z_os));
-	}
+	atomic_store_64(&zfsvfs->z_snap_atime, jiffies);
 }
 
 int
@@ -2055,7 +2140,6 @@ zfsvfs_update_fromname(const char *oldname, const char *newname)
 void
 zfs_init(void)
 {
-	zfsctl_init();
 	zfs_znode_init();
 	dmu_objset_register_type(DMU_OST_ZFS, zpl_get_file_info);
 	register_filesystem(&zpl_fs_type);
@@ -2071,10 +2155,8 @@ zfs_fini(void)
 	taskq_wait(system_taskq);
 	unregister_filesystem(&zpl_fs_type);
 	zfs_znode_fini();
-	zfsctl_fini();
 }
 
-#if defined(_KERNEL)
 EXPORT_SYMBOL(zfs_suspend_fs);
 EXPORT_SYMBOL(zfs_resume_fs);
 EXPORT_SYMBOL(zfs_set_version);
@@ -2089,4 +2171,6 @@ EXPORT_SYMBOL(zfs_statvfs);
 EXPORT_SYMBOL(zfs_vget);
 EXPORT_SYMBOL(zfs_prune);
 EXPORT_SYMBOL(zfs_set_default_quota);
-#endif
+
+ZFS_MODULE_PARAM(zfs, zfs_, sb_uuid, INT, ZMOD_RW,
+	"Set the filesystem UUID from the pool and dataset guids");

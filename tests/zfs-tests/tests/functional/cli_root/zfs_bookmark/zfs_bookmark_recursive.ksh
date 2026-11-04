@@ -1,24 +1,14 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 . $STF_SUITE/include/libtest.shlib
@@ -35,6 +25,9 @@
 # 3. Verify a descendant created after the snapshot is skipped (not an error)
 #    while the others still get a new bookmark.
 # 4. Verify 'zfs bookmark -r' rejects a bookmark source.
+# 5. Verify 'zfs bookmark -r' rejects a new bookmark on a dataset other than
+#    the source snapshot's, and creates no bookmarks at all.
+# 6. Verify the short forms ('#bookmark' and '@snapshot') still work with -r.
 #
 
 verify_runnable "both"
@@ -42,6 +35,8 @@ verify_runnable "both"
 typeset TESTSNAP="testsnap"
 typeset TESTBM="testbm"
 typeset TESTBM2="testbm2"
+typeset TESTBM3="testbm3"
+typeset TESTBM4="testbm4"
 
 typeset ROOT="$TESTPOOL/$TESTFS"
 typeset -a SUBTREE=("$ROOT" "$ROOT/child" "$ROOT/recv")
@@ -90,5 +85,24 @@ log_mustnot eval "bkmarkexists $LATE#$TESTBM2"
 
 # 4. A bookmark source is not valid with -r.
 log_mustnot zfs bookmark -r "$ROOT#$TESTBM" "$ROOT#$TESTBM2"
+
+# 5. The new bookmark must be on the source snapshot's dataset: naming a
+#    different dataset (here one that also has the snapshot) must fail and
+#    must not create a bookmark anywhere.
+log_mustnot zfs bookmark -r "$ROOT@$TESTSNAP" "$OUTSIDE#$TESTBM3"
+log_mustnot zfs bookmark -r "$ROOT@$TESTSNAP" "$ROOT/child#$TESTBM3"
+for ds in "${SUBTREE[@]}" "$OUTSIDE"; do
+	log_mustnot eval "bkmarkexists $ds#$TESTBM3"
+done
+
+# 6. The short forms take the dataset from the other argument.
+log_must zfs bookmark -r "$ROOT@$TESTSNAP" "#$TESTBM3"
+log_must zfs bookmark -r "@$TESTSNAP" "$ROOT#$TESTBM4"
+for ds in "${SUBTREE[@]}"; do
+	log_must eval "bkmarkexists $ds#$TESTBM3"
+	log_must eval "bkmarkexists $ds#$TESTBM4"
+done
+log_mustnot eval "bkmarkexists $OUTSIDE#$TESTBM3"
+log_mustnot eval "bkmarkexists $OUTSIDE#$TESTBM4"
 
 log_pass "'zfs bookmark -r' creates recursive bookmarks as expected"

@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -44,7 +34,8 @@
 #include <string.h>
 
 static int
-get_lease(int fd) {
+get_lease(int fd)
+{
 	int r = fcntl(fd, F_GETLEASE);
 	if (r < 0) {
 		perror("fcntl(GETLEASE)");
@@ -54,7 +45,8 @@ get_lease(int fd) {
 }
 
 static int
-set_lease(int fd, int lease) {
+set_lease(int fd, int lease)
+{
 	return (fcntl(fd, F_SETLEASE, lease) < 0 ? errno : 0);
 }
 
@@ -65,7 +57,8 @@ static const char *lease_str[] = {
 };
 
 static void
-assert_lease(int fd, int expect) {
+assert_lease(int fd, int expect)
+{
 	int got = get_lease(fd);
 	if (got != expect) {
 		fprintf(stderr, "ASSERT_LEASE: expected %s [%d], got %s [%d]\n",
@@ -76,7 +69,8 @@ assert_lease(int fd, int expect) {
 }
 
 static void
-assert_set_lease(int fd, int lease) {
+assert_set_lease(int fd, int lease)
+{
 	int err = set_lease(fd, lease);
 	if (err != 0) {
 		fprintf(stderr, "ASSERT_SET_LEASE: tried %s [%d], error: %s\n",

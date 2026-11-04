@@ -1,24 +1,14 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -55,7 +45,7 @@ log_assert "'zpool create [-R root][-m mountpoint] <pool> <vdev> ...' can create
 	"an alternate pool or a new pool mounted at the specified mountpoint."
 log_onexit cleanup
 
-set -A pooltype "" "mirror" "raidz" "raidz1" "raidz2" "draid" "draid2"
+set -A pooltype "" "mirror" "raidz" "raidz1" "raidz2" "anymirror" "anymirror0" "anymirror1" "anymirror2" "anymirror3" "draid" "draid2"
 
 #
 # cleanup the pools created in previous case if zpool_create_004_pos timedout
@@ -69,7 +59,7 @@ rm -rf $TESTDIR
 log_must mkdir -p $TESTDIR
 typeset -i i=1
 while (( i < 5 )); do
-	log_must truncate -s $FILESIZE $TESTDIR/file.$i
+	log_must truncate -s $MINVDEVSIZE2 $TESTDIR/file.$i
 
 	(( i = i + 1 ))
 done

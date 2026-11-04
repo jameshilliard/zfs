@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -214,6 +204,15 @@ zfs_other_serd_cases(fmd_hdl_t *hdl, const zfs_case_data_t *zfs_case)
 		    zcd->zc_vdev_guid == zfs_case->zc_vdev_guid) {
 			continue;
 		}
+
+		/*
+		 * A solved case is a vdev that has already been diagnosed
+		 * and faulted.  It stays open for as long as the vdev stays
+		 * faulted, so counting it would keep any other vdev under
+		 * the same parent from ever being faulted.
+		 */
+		if (fmd_case_solved(hdl, zcp->zc_case))
+			continue;
 
 		/*
 		 * Check if there is another active serd case besides zfs_case
@@ -559,7 +558,7 @@ zfs_fm_recv(fmd_hdl_t *hdl, fmd_event_t *ep, nvlist_t *nvl, const char *class)
 	uint64_t ena, pool_guid, vdev_guid, parent_guid;
 	uint64_t checksum_n, checksum_t;
 	uint64_t io_n, io_t;
-	er_timeval_t pool_load;
+	er_timeval_t pool_load = {0};
 	er_timeval_t er_when;
 	nvlist_t *detector;
 	boolean_t pool_found = B_FALSE;

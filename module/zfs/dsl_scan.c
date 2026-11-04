@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -27,6 +17,7 @@
  * Copyright (c) 2015, Nexenta Systems, Inc. All rights reserved.
  * Copyright 2019 Joyent, Inc.
  * Copyright 2026 ConnectWise
+ * Copyright 2026 Oxide Computer Company
  */
 
 #include <sys/dsl_scan.h>
@@ -57,9 +48,6 @@
 #include <sys/abd.h>
 #include <sys/range_tree.h>
 #include <sys/dbuf.h>
-#ifdef _KERNEL
-#include <sys/zfs_vfsops.h>
-#endif
 
 /*
  * Grand theory statement on scan queue sorting
@@ -684,10 +672,12 @@ dsl_scan_init(dsl_pool_t *dp, uint64_t txg)
 		/*
 		 * We might be restarting after a reboot, so jump the issued
 		 * counter to how far we've scanned. We know we're consistent
-		 * up to here.
+		 * up to here. scn_phys is on disk, so an older version may
+		 * have left scn_skipped above scn_examined.
 		 */
-		scn->scn_issued_before_pass = scn->scn_phys.scn_examined -
-		    scn->scn_phys.scn_skipped;
+		scn->scn_issued_before_pass =
+		    scn->scn_phys.scn_examined > scn->scn_phys.scn_skipped ?
+		    scn->scn_phys.scn_examined - scn->scn_phys.scn_skipped : 0;
 
 		if (dsl_scan_is_running(scn) &&
 		    spa_prev_software_version(dp->dp_spa) < SPA_VERSION_SCAN) {
@@ -1320,6 +1310,12 @@ dsl_scan_done(dsl_scan_t *scn, boolean_t complete, dmu_tx_t *tx)
 		scn->scn_phys.scn_state = complete ? DSS_FINISHED :
 		    DSS_CANCELED;
 		scn->scn_phys.scn_end_time = gethrestime_sec();
+		/*
+		 * The new state, and the config and labels updated above,
+		 * reach disk when this txg syncs.  Note it so that
+		 * "zpool wait" does not return before then.
+		 */
+		scn->scn_finished_txg = tx->tx_txg;
 		spa->spa_scrub_started = B_FALSE;
 
 		/*
@@ -1353,6 +1349,7 @@ dsl_scan_done(dsl_scan_t *scn, boolean_t complete, dmu_tx_t *tx)
 		scn->scn_phys.scn_state = complete ? DSS_FINISHED :
 		    DSS_CANCELED;
 		scn->scn_phys.scn_end_time = gethrestime_sec();
+		scn->scn_finished_txg = tx->tx_txg;
 	}
 
 	spa_notify_waiters(spa);
@@ -1912,7 +1909,6 @@ static int
 dsl_scan_zil_record(zilog_t *zilog, const lr_t *lrc, void *arg,
     uint64_t claim_txg)
 {
-	(void) zilog;
 	if (lrc->lrc_txtype == TX_WRITE) {
 		zil_scan_arg_t *zsa = arg;
 		dsl_pool_t *dp = zsa->zsa_dp;
@@ -1933,6 +1929,10 @@ dsl_scan_zil_record(zilog_t *zilog, const lr_t *lrc, void *arg,
 		 * other records that are not synced)
 		 */
 		if (claim_txg == 0 || BP_GET_BIRTH(bp) < claim_txg)
+			return (0);
+
+		/* Several records can share a dmu_sync() block. */
+		if (zil_bp_tree_add(zilog, bp) != 0)
 			return (0);
 
 		ASSERT3U(BP_GET_LSIZE(bp), !=, 0);
@@ -3261,7 +3261,8 @@ dsl_scan_visit(dsl_scan_t *scn, dmu_tx_t *tx)
 			dsl_scan_visitds(scn,
 			    dp->dp_origin_snap->ds_object, tx);
 		}
-		ASSERT(!scn->scn_suspending);
+		if (scn->scn_suspending)
+			return;
 	} else if (scn->scn_phys.scn_bookmark.zb_objset !=
 	    ZB_DESTROYED_OBJSET) {
 		uint64_t dsobj = scn->scn_phys.scn_bookmark.zb_objset;
@@ -3716,6 +3717,20 @@ dsl_scan_async_block_should_pause(dsl_scan_t *scn)
 		return (B_TRUE);
 	}
 
+	/*
+	 * Async frees of deduplicated or cloned blocks dirty DDT/BRT
+	 * ZAPs in this txg's sync context, which is not limited by the
+	 * write throttle.  Pause if this txg has already accumulated too
+	 * much dirty data, including the reservations for DDT/BRT updates
+	 * that have not been applied yet at this point of the sync.
+	 */
+	dsl_pool_t *dp = scn->scn_dp;
+	uint64_t txg = spa_syncing_txg(dp->dp_spa) & TXG_MASK;
+	if (dp->dp_dirty_pertxg[txg] + dp->dp_sync_reserve_pertxg[txg] >
+	    zfs_dirty_data_max / 2) {
+		return (B_TRUE);
+	}
+
 	elapsed_nanosecs = getlrtime() - scn->scn_sync_start_time;
 	return (elapsed_nanosecs / (NANOSEC / 2) > zfs_txg_timeout ||
 	    (NSEC2MSEC(elapsed_nanosecs) > scn->scn_async_block_min_time_ms &&
@@ -3746,6 +3761,20 @@ dsl_scan_free_block_cb(void *arg, const blkptr_t *bp, dmu_tx_t *tx)
 		 * async I/O (dedup, clone or gang block).
 		 */
 		scn->scn_async_frees_this_txg++;
+
+		/*
+		 * Reserve dirty space for the DDT/BRT ZAP updates this
+		 * free will produce later in this txg's sync, providing
+		 * feedback for the pause check above.
+		 */
+		spa_t *spa = scn->scn_dp->dp_spa;
+		uint64_t space = 0;
+		if (BP_GET_DEDUP(bp))
+			space = ddt_sync_dirty_est(spa);
+		else if (brt_maybe_exists(spa, bp))
+			space = brt_sync_dirty_est(spa);
+		dsl_pool_sync_reserve(scn->scn_dp, space, tx);
+
 		zio_nowait(zio);
 
 		/*
@@ -4492,8 +4521,10 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		 * See print_scan_scrub_resilver_status() issued/total_i
 		 * @ cmd/zpool/zpool_main.c
 		 */
-		to_issue =
-		    scn->scn_phys.scn_to_examine - scn->scn_phys.scn_skipped;
+		/* scn_to_examine is sampled once; scn_skipped keeps growing. */
+		to_issue = scn->scn_phys.scn_to_examine >
+		    scn->scn_phys.scn_skipped ? scn->scn_phys.scn_to_examine -
+		    scn->scn_phys.scn_skipped : 0;
 		issued =
 		    scn->scn_issued_before_pass + spa->spa_scan_pass_issued;
 		restart_early =
@@ -4567,7 +4598,8 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 	scn->scn_zios_this_txg = 0;
 	scn->scn_suspending = B_FALSE;
 	scn->scn_sync_start_time = getlrtime();
-	spa->spa_scrub_active = B_TRUE;
+	if (dsl_scan_is_running(scn))
+		spa->spa_scrub_active = B_TRUE;
 
 	/*
 	 * First process the async destroys.  If we suspend, don't do
@@ -4971,6 +5003,10 @@ dsl_scan_scrub_cb(dsl_pool_t *dp,
 	count_block(dp->dp_blkstats, bp);
 	if (phys_birth <= scn->scn_phys.scn_min_txg ||
 	    phys_birth >= scn->scn_phys.scn_max_txg) {
+		/* Traversed but not scrubbed; both counters must see it. */
+		uint64_t asize = BP_GET_ASIZE(bp);
+		scn->scn_phys.scn_examined += asize;
+		spa->spa_scan_pass_exam += asize;
 		count_block_skipped(scn, bp, B_TRUE);
 		return (0);
 	}

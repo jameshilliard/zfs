@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -518,6 +508,15 @@ vdev_prop_init(void)
 	zprop_register_number(VDEV_PROP_BYTES_TRIM, "trim_bytes", 0,
 	    PROP_READONLY, ZFS_TYPE_VDEV, "<bytes>", "TRIMBYTE", B_FALSE,
 	    sfeatures);
+	zprop_register_number(VDEV_PROP_ANYRAID_CAP_TILES,
+	    "anyraid_tile_capacity", 0, PROP_READONLY, ZFS_TYPE_VDEV,
+	    "<regions>", "TILECAP", B_FALSE, sfeatures);
+	zprop_register_number(VDEV_PROP_ANYRAID_NUM_TILES,
+	    "anyraid_tile_count", 0, PROP_READONLY, ZFS_TYPE_VDEV,
+	    "<regions>", "NUMTILES", B_FALSE, sfeatures);
+	zprop_register_number(VDEV_PROP_ANYRAID_TILE_SIZE,
+	    "anyraid_tile_size", 0, PROP_READONLY, ZFS_TYPE_VDEV,
+	    "<bytes>", "TILESIZE", B_FALSE, sfeatures);
 
 	/* default numeric properties */
 	zprop_register_number(VDEV_PROP_CHECKSUM_N, "checksum_n", UINT64_MAX,

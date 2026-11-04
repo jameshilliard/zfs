@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -25,6 +15,7 @@
  * Copyright (c) 2011, 2020 by Delphix. All rights reserved.
  * Copyright (c) 2017, Intel Corporation.
  * Copyright (c) 2019, Datto Inc. All rights reserved.
+ * Copyright (c) 2026, TrueNAS.
  */
 
 #ifndef _SYS_VDEV_H
@@ -56,9 +47,10 @@ typedef boolean_t vdev_open_children_func_t(vdev_t *vd);
 extern void vdev_dbgmsg(vdev_t *vd, const char *fmt, ...)
     __attribute__((format(__printf__, 2, 3)));
 extern void vdev_dbgmsg_print_tree(vdev_t *, int);
-extern int vdev_open(vdev_t *);
-extern void vdev_open_children(vdev_t *);
-extern void vdev_open_children_subset(vdev_t *, vdev_open_children_func_t *);
+extern int vdev_open(vdev_t *, cred_t *);
+extern void vdev_open_children(vdev_t *, cred_t *);
+extern void vdev_open_children_subset(vdev_t *, cred_t *,
+    vdev_open_children_func_t *);
 extern int vdev_validate(vdev_t *);
 extern int vdev_copy_path_strict(vdev_t *, vdev_t *);
 extern void vdev_copy_path_relaxed(vdev_t *, vdev_t *);
@@ -128,6 +120,7 @@ extern void vdev_propagate_state(vdev_t *vd);
 extern void vdev_set_state(vdev_t *vd, boolean_t isopen, vdev_state_t state,
     vdev_aux_t aux);
 extern boolean_t vdev_children_are_offline(vdev_t *vd);
+extern char *vdev_name(vdev_t *vd, char *buf, int buflen);
 
 extern void vdev_space_update(vdev_t *vd,
     int64_t alloc_delta, int64_t defer_delta, int64_t space_delta);
@@ -140,6 +133,7 @@ extern uint64_t vdev_psize_to_asize_txg(vdev_t *vd, uint64_t psize,
     uint64_t txg);
 extern uint64_t vdev_psize_to_asize(vdev_t *vd, uint64_t psize);
 extern uint64_t vdev_get_min_alloc(vdev_t *vd);
+extern uint64_t vdev_alloc_factor(vdev_t *vd);
 
 /*
  * Return the amount of space allocated for a gang block header.  Note that
@@ -184,6 +178,7 @@ extern void vdev_queue_init(vdev_t *vd);
 extern void vdev_queue_fini(vdev_t *vd);
 extern zio_t *vdev_queue_io(zio_t *zio);
 extern void vdev_queue_io_done(zio_t *zio);
+extern boolean_t vdev_should_queue_io(zio_t *zio);
 extern void vdev_queue_change_io_priority(zio_t *zio, zio_priority_t priority);
 
 extern uint32_t vdev_queue_length(vdev_t *vd);
@@ -191,9 +186,17 @@ extern uint64_t vdev_queue_last_offset(vdev_t *vd);
 extern uint64_t vdev_queue_class_length(vdev_t *vq, zio_priority_t p);
 extern boolean_t vdev_queue_pool_busy(spa_t *spa);
 
+typedef enum vdev_config_sync_status {
+    VDEV_CONFIG_KEEP_CHECKPOINT,
+    VDEV_CONFIG_CREATING_CHECKPOINT,
+    VDEV_CONFIG_NO_CHECKPOINT,
+    VDEV_CONFIG_REWINDING_CHECKPOINT
+} vdev_config_sync_status_t;
+
 extern void vdev_config_dirty(vdev_t *vd);
 extern void vdev_config_clean(vdev_t *vd);
-extern int vdev_config_sync(vdev_t **svd, int svdcount, uint64_t txg);
+extern int vdev_config_sync(spa_t *spa, vdev_t **svd, int svdcount,
+    uint64_t txg, vdev_config_sync_status_t status);
 
 extern void vdev_state_dirty(vdev_t *vd);
 extern void vdev_state_clean(vdev_t *vd);
@@ -213,6 +216,8 @@ extern void vdev_clear_kobj_evt(vdev_t *vd);
 extern void vdev_top_config_generate(spa_t *spa, nvlist_t *config);
 extern nvlist_t *vdev_config_generate(spa_t *spa, vdev_t *vd,
     boolean_t getstats, vdev_config_flag_t flags);
+extern void vdev_config_generate_impl(spa_t *spa, vdev_t *vd, nvlist_t *nv,
+    boolean_t getstats, vdev_config_flag_t flags);
 
 /*
  * Label routines
@@ -220,14 +225,15 @@ extern nvlist_t *vdev_config_generate(spa_t *spa, vdev_t *vd,
 struct uberblock;
 extern uint64_t vdev_label_offset(uint64_t psize, int l, uint64_t offset);
 extern int vdev_label_number(uint64_t psise, uint64_t offset);
-extern nvlist_t *vdev_label_read_config(vdev_t *vd, uint64_t txg);
+extern nvlist_t *vdev_label_read_config(vdev_t *vd, uint64_t txg, int labels);
 extern void vdev_uberblock_load(vdev_t *, struct uberblock *, nvlist_t **);
 extern void vdev_config_generate_stats(vdev_t *vd, nvlist_t *nv);
 extern void vdev_label_write(zio_t *zio, vdev_t *vd, int l, abd_t *buf, uint64_t
     offset, uint64_t size, zio_done_func_t *done, void *priv, int flags);
 extern int vdev_label_read_bootenv(vdev_t *, nvlist_t *);
 extern int vdev_label_write_bootenv(vdev_t *, nvlist_t *);
-extern int vdev_uberblock_sync_list(vdev_t **, int, struct uberblock *, int);
+extern int vdev_uberblock_sync_list(spa_t *, vdev_t **, int,
+    struct uberblock *, int);
 extern int vdev_uberblock_compare(const struct uberblock *,
     const struct uberblock *);
 extern int vdev_check_boot_reserve(spa_t *, vdev_t *);

@@ -8,7 +8,7 @@
 #
 # A full copy of the text of the CDDL should have accompanied this
 # source.  A copy of the CDDL is also available via the Internet at
-# http://www.illumos.org/license/CDDL.
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -85,7 +85,13 @@ log_must mkfile 1m /$TESTPOOL2/$TESTCLONE/B
 
 # Resume condense thr
 set_tunable32 LIVELIST_CONDENSE_SYNC_PAUSE 0
-sync_pool $TESTPOOL2
+# The zthr only sees the resume on its next tick before it queues the
+# condense synctask, so the synctask may land in a later txg than the one
+# sync_pool waits for: sync until it has run.
+for i in {1..10}; do
+	sync_pool $TESTPOOL2
+	[[ "0" < "$(get_tunable LIVELIST_CONDENSE_NEW_ALLOC)" ]] && break
+done
 # Check that we've added new ALLOC blkptrs during the condense
 [[ "0" < "$(get_tunable LIVELIST_CONDENSE_NEW_ALLOC)" ]] || \
     log_fail "removal/condense test failed"

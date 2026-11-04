@@ -1,23 +1,13 @@
 .\" SPDX-License-Identifier: CDDL-1.0
 .\"
-.\" CDDL HEADER START
+.\" This file and its contents are supplied under the terms of the
+.\" Common Development and Distribution License ("CDDL"), version 1.0.
+.\" You may only use this file in accordance with the terms of version
+.\" 1.0 of the CDDL.
 .\"
-.\" The contents of this file are subject to the terms of the
-.\" Common Development and Distribution License (the "License").
-.\" You may not use this file except in compliance with the License.
-.\"
-.\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or https://opensource.org/licenses/CDDL-1.0.
-.\" See the License for the specific language governing permissions
-.\" and limitations under the License.
-.\"
-.\" When distributing Covered Code, include this CDDL HEADER in each
-.\" file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-.\" If applicable, add the following below this CDDL HEADER, with the
-.\" fields enclosed by brackets "[]" replaced with your own identifying
-.\" information: Portions Copyright [yyyy] [name of copyright owner]
-.\"
-.\" CDDL HEADER END
+.\" A full copy of the text of the CDDL should have accompanied this
+.\" source.  A copy of the CDDL is also available via the Internet at
+.\" https://opensource.org/license/CDDL-1.0.
 .\"
 .\" Copyright (c) 2007, Sun Microsystems, Inc. All Rights Reserved.
 .\" Copyright (c) 2012, 2018 by Delphix. All rights reserved.
@@ -29,7 +19,7 @@
 .\" Copyright (c) 2024-2026, Klara, Inc.
 .\" Copyright (c) 2026, TrueNAS.
 .\"
-.Dd May 26, 2026
+.Dd June 16, 2026
 .Dt ZPOOL-STATUS 8
 .Os
 .
@@ -39,7 +29,8 @@
 .Sh SYNOPSIS
 .Nm zpool
 .Cm status
-.Op Fl DdegiLPpstvx
+.Op Fl DdegiLPpstx
+.Op Fl v|-vv
 .Op Fl c Ar script1 Ns Oo , Ns Ar script2 Ns ,… Oc
 .Oo Fl j|--json
 .Oo Ns Fl -json-flat-vdevs Oc
@@ -158,9 +149,13 @@ See
 .Xr time 1 .
 .It Fl t
 Display vdev TRIM status.
-.It Fl v
+.It Fl v|-vv
 Displays verbose data error information, printing out a complete list of all
-data errors since the last complete pool scrub.
+files containing data errors since the last complete pool scrub.
+Specified twice
+.Pq Sy -vv
+prints out the complete list of all corrupt records within
+each corrupt file.
 If the head_errlog feature is enabled and files containing errors have been
 removed then the respective filenames will not be reported in subsequent runs
 of this command.

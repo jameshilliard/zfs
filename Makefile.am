@@ -31,9 +31,10 @@ if BUILD_LINUX
 include $(srcdir)/%D%/udev/Makefile.am
 endif
 endif
-CPPCHECKDIRS += module
 if CONFIG_KERNEL
 SUBDIRS += module
+
+CPPCHECKDIRS += module
 
 extradir = $(prefix)/src/zfs-$(VERSION)
 extra_HEADERS = zfs.release.in zfs_config.h.in
@@ -66,9 +67,11 @@ GITREV = include/zfs_gitrev.h
 CLEANFILES += $(GITREV)
 PHONY += gitrev
 gitrev:
-	$(AM_V_GEN)$(top_srcdir)/scripts/make_gitrev.sh $(GITREV)
+	$(AM_V_GEN)cd "$(abs_top_builddir)"; \
+	$(top_srcdir)/scripts/make_gitrev.sh $(GITREV)
 
-all: gitrev
+GITREV_TARGETS := $(shell $(GREP) -rl --include="*.[ch]" $(notdir $(GITREV)) "$(abs_srcdir)"/* | sed "s|$(abs_srcdir)/||" )
+$(GITREV_TARGETS): gitrev
 
 PHONY += install-data-hook $(INSTALL_DATA_HOOKS)
 install-data-hook: $(INSTALL_DATA_HOOKS)

@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
@@ -198,8 +188,6 @@ typedef struct ace_object {
 /* minimal acl entries from GETACLCNT */
 #define	MIN_ACL_ENTRIES		4
 
-#if !defined(_KERNEL)
-
 /* acl check errors */
 #define	GRP_ERROR		1
 #define	USER_ERROR		2
@@ -282,14 +270,6 @@ extern int acl_trivial(const char *);
 extern char *acl_totext(acl_t *, int);
 extern int acl_fromtext(const char *, acl_t **);
 extern int acl_check(acl_t *, int);
-
-#else	/* !defined(_KERNEL) */
-
-extern void ksort(caddr_t, int, int, int (*)(void *, void *));
-extern int cmp2acls(void *, void *);
-
-#endif	/* !defined(_KERNEL) */
-
 extern int acl(const char *path, int cmd, int cnt, void *buf);
 extern int facl(int fd, int cmd, int cnt, void *buf);
 

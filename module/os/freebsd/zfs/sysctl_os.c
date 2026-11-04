@@ -93,6 +93,8 @@
 #include <sys/vmmeter.h>
 
 SYSCTL_DECL(_vfs_zfs);
+SYSCTL_NODE(_vfs_zfs, OID_AUTO, anyraid, CTLFLAG_RW, 0,
+	"ZFS AnyRAID VDEV");
 SYSCTL_NODE(_vfs_zfs, OID_AUTO, arc, CTLFLAG_RW, 0,
 	"ZFS adaptive replacement cache");
 SYSCTL_NODE(_vfs_zfs, OID_AUTO, brt, CTLFLAG_RW, 0,
@@ -198,7 +200,7 @@ param_set_arc_max(SYSCTL_HANDLER_ARGS)
 	arc_tuning_update(B_TRUE);
 
 	/* Update the sysctl to the tuned value */
-	if (val != 0)
+	if (val != 0 && arc_c_max != 0)
 		zfs_arc_max = arc_c_max;
 
 	return (0);
@@ -215,14 +217,15 @@ param_set_arc_min(SYSCTL_HANDLER_ARGS)
 	if (err != 0 || req->newptr == NULL)
 		return (SET_ERROR(err));
 
-	if (val != 0 && (val < 2ULL << SPA_MAXBLOCKSHIFT || val > arc_c_max))
+	if (val != 0 && (val < 2ULL << SPA_MAXBLOCKSHIFT ||
+	    (arc_c_max != 0 && val > arc_c_max)))
 		return (SET_ERROR(EINVAL));
 
 	zfs_arc_min = val;
 	arc_tuning_update(B_TRUE);
 
 	/* Update the sysctl to the tuned value */
-	if (val != 0)
+	if (val != 0 && arc_c_max != 0)
 		zfs_arc_min = arc_c_min;
 
 	return (0);
@@ -482,27 +485,6 @@ param_set_max_auto_ashift(SYSCTL_HANDLER_ARGS)
 
 	return (0);
 }
-
-/*
- * Since the DTL space map of a vdev is not expected to have a lot of
- * entries, we default its block size to 4K.
- */
-extern int zfs_vdev_dtl_sm_blksz;
-
-SYSCTL_INT(_vfs_zfs, OID_AUTO, dtl_sm_blksz,
-	CTLFLAG_RDTUN, &zfs_vdev_dtl_sm_blksz, 0,
-	"Block size for DTL space map.  Power of 2 greater than 4096.");
-
-/*
- * vdev-wide space maps that have lots of entries written to them at
- * the end of each transaction can benefit from a higher I/O bandwidth
- * (e.g. vdev_obsolete_sm), thus we default their block size to 128K.
- */
-extern int zfs_vdev_standard_sm_blksz;
-
-SYSCTL_INT(_vfs_zfs, OID_AUTO, standard_sm_blksz,
-	CTLFLAG_RDTUN, &zfs_vdev_standard_sm_blksz, 0,
-	"Block size for standard space map.  Power of 2 greater than 4096.");
 
 /* zio.c */
 

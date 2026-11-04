@@ -1,24 +1,14 @@
 #! /bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -41,5 +31,41 @@ done
 
 log_must eval "zarcsummary | head > /dev/null"
 log_must eval "zarcsummary | head -1 > /dev/null"
+
+#
+# ksh's pipes are socketpairs, and zarcsummary writes unbuffered, a line
+# at a time.  When head(1) starts late, zarcsummary fills the socket and
+# blocks; head then exits with output unread, the socket is reset, and
+# the blocked write fails with ECONNRESET rather than EPIPE.  The
+# pipelines above only hit that by chance, so set it up directly: give
+# zarcsummary a socket with the smallest send buffer, wait until it is
+# blocked writing, then close the other end without reading.
+#
+if is_linux; then
+	log_must python3 - zarcsummary <<-'EOF'
+	import fcntl, socket, struct, subprocess, sys, termios, time
+
+	r, w = socket.socketpair()
+	w.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1)
+	sndbuf = w.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+	p = subprocess.Popen(sys.argv[1:], stdout=w)
+
+	def blocked():
+	    outq = fcntl.ioctl(w, termios.TIOCOUTQ, b"\0" * 4)
+	    with open("/proc/%d/stat" % p.pid) as f:
+	        state = f.read().rpartition(")")[2].split()[0]
+	    return struct.unpack("i", outq)[0] >= sndbuf and state == "S"
+
+	deadline = time.monotonic() + 60
+	while not blocked():
+	    if p.poll() is not None:
+	        sys.exit("zarcsummary exited before filling the socket")
+	    if time.monotonic() > deadline:
+	        sys.exit("zarcsummary did not block writing")
+	    time.sleep(0.01)
+	r.close()
+	sys.exit(p.wait())
+	EOF
+fi
 
 log_pass "zarcsummary generates output and doesn't return an error code"

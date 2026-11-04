@@ -1,28 +1,19 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2015, 2018 by Delphix. All rights reserved.
  * Copyright (c) 2022 by Pawel Jakub Dawidek
+ * Copyright 2026 Oxide Computer Company
  */
 
 
@@ -47,6 +38,7 @@
 #include <sys/spa.h>
 #include <sys/zfs_fuid.h>
 #include <sys/dsl_dataset.h>
+#include <sys/zfs_vnops.h>
 
 /*
  * These zfs_log_* functions must be called within a dmu tx, in one
@@ -229,50 +221,30 @@ zfs_xattr_owner_unlinked(znode_t *zp)
 {
 	int unlinked = 0;
 	znode_t *dzp;
-#ifdef __FreeBSD__
 	znode_t *tzp = zp;
 
 	/*
-	 * zrele drops the vnode lock which violates the VOP locking contract
-	 * on FreeBSD. See comment at the top of zfs_replay.c for more detail.
-	 */
-	/*
-	 * if zp is XATTR node, keep walking up via z_xattr_parent until we
-	 * get the owner
+	 * zp is borrowed and must not be released here.  Only release
+	 * references acquired by zfs_zget(), and release them asynchronously
+	 * because zfs_log_* functions are called with an assigned transaction.
+	 *
+	 * If zp is an XATTR node, keep walking up via z_xattr_parent until we
+	 * get the owner.
 	 */
 	while (tzp->z_pflags & ZFS_XATTR) {
-		ASSERT3U(zp->z_xattr_parent, !=, 0);
+		ASSERT3U(tzp->z_xattr_parent, !=, 0);
 		if (zfs_zget(ZTOZSB(tzp), tzp->z_xattr_parent, &dzp) != 0) {
 			unlinked = 1;
 			break;
 		}
 
 		if (tzp != zp)
-			zrele(tzp);
+			zfs_zrele_async(tzp);
 		tzp = dzp;
 		unlinked = tzp->z_unlinked;
 	}
 	if (tzp != zp)
-		zrele(tzp);
-#else
-	zhold(zp);
-	/*
-	 * if zp is XATTR node, keep walking up via z_xattr_parent until we
-	 * get the owner
-	 */
-	while (zp->z_pflags & ZFS_XATTR) {
-		ASSERT3U(zp->z_xattr_parent, !=, 0);
-		if (zfs_zget(ZTOZSB(zp), zp->z_xattr_parent, &dzp) != 0) {
-			unlinked = 1;
-			break;
-		}
-
-		zrele(zp);
-		zp = dzp;
-		unlinked = zp->z_unlinked;
-	}
-	zrele(zp);
-#endif
+		zfs_zrele_async(tzp);
 	return (unlinked);
 }
 
@@ -678,7 +650,7 @@ zfs_log_write(zilog_t *zilog, dmu_tx_t *tx, int txtype,
 		lr->lr_foid = zp->z_id;
 		lr->lr_offset = off;
 		lr->lr_length = len;
-		lr->lr_blkoff = 0;
+		lr->lr_flags = 0;
 		BP_ZERO(&lr->lr_blkptr);
 
 		itx->itx_private = ZTOZSB(zp);

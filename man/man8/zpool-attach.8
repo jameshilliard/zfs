@@ -1,23 +1,13 @@
 .\" SPDX-License-Identifier: CDDL-1.0
 .\"
-.\" CDDL HEADER START
+.\" This file and its contents are supplied under the terms of the
+.\" Common Development and Distribution License ("CDDL"), version 1.0.
+.\" You may only use this file in accordance with the terms of version
+.\" 1.0 of the CDDL.
 .\"
-.\" The contents of this file are subject to the terms of the
-.\" Common Development and Distribution License (the "License").
-.\" You may not use this file except in compliance with the License.
-.\"
-.\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or https://opensource.org/licenses/CDDL-1.0.
-.\" See the License for the specific language governing permissions
-.\" and limitations under the License.
-.\"
-.\" When distributing Covered Code, include this CDDL HEADER in each
-.\" file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-.\" If applicable, add the following below this CDDL HEADER, with the
-.\" fields enclosed by brackets "[]" replaced with your own identifying
-.\" information: Portions Copyright [yyyy] [name of copyright owner]
-.\"
-.\" CDDL HEADER END
+.\" A full copy of the text of the CDDL should have accompanied this
+.\" source.  A copy of the CDDL is also available via the Internet at
+.\" https://opensource.org/license/CDDL-1.0.
 .\"
 .\" Copyright (c) 2007, Sun Microsystems, Inc. All Rights Reserved.
 .\" Copyright (c) 2012, 2018 by Delphix. All rights reserved.
@@ -27,7 +17,7 @@
 .\" Copyright 2017 Nexenta Systems, Inc.
 .\" Copyright (c) 2017 Open-E, Inc. All Rights Reserved.
 .\"
-.Dd May 9, 2026
+.Dd October 13, 2026
 .Dt ZPOOL-ATTACH 8
 .Os
 .
@@ -91,11 +81,18 @@ and waiting for reconstruction to complete).
 Expansion does not change the number of failures that can be tolerated
 without data loss (e.g. a RAID-Z2 is still a RAID-Z2 even after expansion).
 A RAID-Z vdev can be expanded multiple times.
+Each expansion uses the 3.5 MiB boot area that ZFS reserves near the start of
+every disk as scratch space, and that area has to hold one sector for each disk
+of the expanded vdev: with
+.Sy ashift Ns = Ns Sy 16 ,
+for example, a RAID-Z vdev can be expanded to at most 56 disks.
 .Pp
 After the expansion completes, old blocks retain their old data-to-parity
 ratio
 .Pq e.g. 5-wide RAID-Z2 has 3 data and 2 parity
 but distributed among the larger set of disks.
+They can be rewritten with the new ratio using
+.Xr zfs-rewrite 8 .
 New blocks will be written with the new data-to-parity ratio (e.g. a 5-wide
 RAID-Z2 which has been expanded once to 6-wide, has 4 data and 2 parity).
 However, the vdev's assumed parity ratio does not change, so slightly less
@@ -162,6 +159,7 @@ Old blocks keep their original data-to-parity ratio; only blocks written
 after the expansion use the new ratio.
 .
 .Sh SEE ALSO
+.Xr zfs-rewrite 8 ,
 .Xr zpool-add 8 ,
 .Xr zpool-detach 8 ,
 .Xr zpool-import 8 ,

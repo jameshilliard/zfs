@@ -1,23 +1,13 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -96,6 +86,7 @@ function default_degrade
 	do_setup
 
 	log_must mkfile $FILESIZE $FILEPATH
+	log_must zpool sync $POOL
 	log_must zinject -a -t data -e checksum -T read -f 100 $FILEPATH
 
 	blk=0
@@ -117,6 +108,7 @@ function checksum_t_no_degrade
 
 	log_must zpool set checksum_t=1 $POOL $VDEV
 	log_must mkfile $FILESIZE $FILEPATH
+	log_must zpool sync $POOL
 	log_must zinject -a -t data -e checksum -T read -f 100 $FILEPATH
 
 	blk=0
@@ -139,6 +131,7 @@ function checksum_n_degrade
 
 	log_must zpool set checksum_n=1 $POOL $VDEV
 	log_must mkfile $FILESIZE $FILEPATH
+	log_must zpool sync $POOL
 	log_must zinject -a -t data -e checksum -T read -f 100 $FILEPATH
 
 	dd if=$FILEPATH of=/dev/null bs=1 count=1 2>/dev/null

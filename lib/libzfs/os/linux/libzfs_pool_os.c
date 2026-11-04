@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -32,7 +22,6 @@
  */
 
 #include <errno.h>
-#include <libintl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,8 +52,8 @@ zpool_relabel_disk(libzfs_handle_t *hdl, const char *path, const char *msg)
 	int fd, error;
 
 	if ((fd = open(path, O_RDWR|O_DIRECT|O_CLOEXEC)) < 0) {
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, "cannot "
-		    "relabel '%s': unable to open device: %d"), path, errno);
+		zfs_error_aux(hdl, "cannot "
+		    "relabel '%s': unable to open device: %d", path, errno);
 		return (zfs_error(hdl, EZFS_OPENFAILED, msg));
 	}
 
@@ -81,8 +70,8 @@ zpool_relabel_disk(libzfs_handle_t *hdl, const char *path, const char *msg)
 
 	(void) close(fd);
 	if (error && error != VT_ENOSPC) {
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, "cannot "
-		    "relabel '%s': unable to read disk capacity"), path);
+		zfs_error_aux(hdl, "cannot "
+		    "relabel '%s': unable to read disk capacity", path);
 		return (zfs_error(hdl, EZFS_NOCAP, msg));
 	}
 	return (0);
@@ -221,7 +210,7 @@ zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, const char *name)
 
 	/* prepare an error message just in case */
 	(void) snprintf(errbuf, sizeof (errbuf),
-	    dgettext(TEXT_DOMAIN, "cannot label '%s'"), name);
+	    "cannot label '%s'", name);
 
 	if (zhp) {
 		nvlist_t *nvroot = fnvlist_lookup_nvlist(zhp->zpool_config,
@@ -244,8 +233,8 @@ zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, const char *name)
 		 * This shouldn't happen.  We've long since verified that this
 		 * is a valid device.
 		 */
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, "cannot "
-		    "label '%s': unable to open device: %d"), path, errno);
+		zfs_error_aux(hdl, "cannot "
+		    "label '%s': unable to open device: %d", path, errno);
 		return (zfs_error(hdl, EZFS_OPENFAILED, errbuf));
 	}
 
@@ -258,8 +247,8 @@ zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, const char *name)
 			(void) no_memory(hdl);
 
 		(void) close(fd);
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, "cannot "
-		    "label '%s': unable to read disk capacity"), path);
+		zfs_error_aux(hdl, "cannot "
+		    "label '%s': unable to read disk capacity", path);
 
 		return (zfs_error(hdl, EZFS_NOCAP, errbuf));
 	}
@@ -294,9 +283,9 @@ zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, const char *name)
 		(void) close(fd);
 		efi_free(vtoc);
 
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, "cannot "
+		zfs_error_aux(hdl, "cannot "
 		    "label '%s': partition would be less than the minimum "
-		    "device size (64M)"), path);
+		    "device size (64M)", path);
 		return (zfs_error(hdl, EZFS_LABELFAILED, errbuf));
 	}
 
@@ -334,8 +323,8 @@ zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, const char *name)
 		(void) close(fd);
 		efi_free(vtoc);
 
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, "try using "
-		    "parted(8) and then provide a specific slice: %d"), rval);
+		zfs_error_aux(hdl, "try using "
+		    "parted(8) and then provide a specific slice: %d", rval);
 		return (zfs_error(hdl, EZFS_LABELFAILED, errbuf));
 	}
 
@@ -348,8 +337,8 @@ zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, const char *name)
 	/* Wait to udev to signal use the device has settled. */
 	rval = zpool_label_disk_wait(path, DISK_LABEL_WAIT);
 	if (rval) {
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, "failed to "
-		    "detect device partitions on '%s': %d"), path, rval);
+		zfs_error_aux(hdl, "failed to "
+		    "detect device partitions on '%s': %d", path, rval);
 		return (zfs_error(hdl, EZFS_LABELFAILED, errbuf));
 	}
 
@@ -357,9 +346,9 @@ zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, const char *name)
 	(void) snprintf(path, sizeof (path), "%s/%s", DISK_ROOT, name);
 	rval = zpool_label_disk_check(path);
 	if (rval) {
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, "freshly written "
+		zfs_error_aux(hdl, "freshly written "
 		    "EFI label on '%s' is damaged.  Ensure\nthis device "
-		    "is not in use, and is functioning properly: %d"),
+		    "is not in use, and is functioning properly: %d",
 		    path, rval);
 		return (zfs_error(hdl, EZFS_LABELFAILED, errbuf));
 	}

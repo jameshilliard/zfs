@@ -8,7 +8,7 @@
 #
 # A full copy of the text of the CDDL should have accompanied this
 # source.  A copy of the CDDL is also available via the Internet at
-# http://www.illumos.org/license/CDDL.
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -45,6 +45,6 @@ add_io_delay $TESTPOOL
 log_must zpool scrub $TESTPOOL
 log_bkgrnd zpool wait -t scrub $TESTPOOL
 pid=$!
-check_while_waiting $pid "is_pool_scrubbing $TESTPOOL"
+check_while_waiting $pid "is_pool_scrubbing $TESTPOOL" $TESTPOOL
 
 log_pass "'zpool wait -t scrub' works."

@@ -48,7 +48,8 @@
 #include <sys/stat.h>
 
 int
-zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
+zfs_file_open(const char *path, int flags, int mode, cred_t *cr,
+    zfs_file_t **zfpp)
 {
 	struct thread *td;
 	struct vnode *vp;
@@ -76,7 +77,7 @@ zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 #else
 	NDINIT(&nd, LOOKUP, FOLLOW, UIO_SYSSPACE, path, td);
 #endif
-	error = vn_open(&nd, &flags, mode, fp);
+	error = vn_open_cred(&nd, &flags, mode, 0, cr, fp);
 	if (error != 0) {
 		falloc_abort(td, fp);
 		return (SET_ERROR(error));
@@ -94,27 +95,28 @@ zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 	}
 
 	if (flags & O_TRUNC) {
-		error = fo_truncate(fp, 0, td->td_ucred, td);
+		error = fo_truncate(fp, 0, cr, td);
 		if (error != 0) {
 			zfs_file_close(fp);
 			return (SET_ERROR(error));
 		}
 	}
 
-	*fpp = fp;
+	*zfpp = fp;
 
 	return (0);
 }
 
 void
-zfs_file_close(zfs_file_t *fp)
+zfs_file_close(zfs_file_t *zfp)
 {
+	struct file *fp = zfp;
 	fdrop(fp, curthread);
 }
 
 static int
-zfs_file_write_impl(zfs_file_t *fp, const void *buf, size_t count, loff_t *offp,
-    ssize_t *resid)
+zfs_file_write_impl(struct file *fp, const void *buf, size_t count,
+    loff_t *offp, ssize_t *resid)
 {
 	ssize_t rc;
 	struct uio auio;
@@ -150,8 +152,9 @@ zfs_file_write_impl(zfs_file_t *fp, const void *buf, size_t count, loff_t *offp,
 }
 
 int
-zfs_file_write(zfs_file_t *fp, const void *buf, size_t count, ssize_t *resid)
+zfs_file_write(zfs_file_t *zfp, const void *buf, size_t count, ssize_t *resid)
 {
+	struct file *fp = zfp;
 	loff_t off = fp->f_offset;
 	ssize_t rc;
 
@@ -163,15 +166,15 @@ zfs_file_write(zfs_file_t *fp, const void *buf, size_t count, ssize_t *resid)
 }
 
 int
-zfs_file_pwrite(zfs_file_t *fp, const void *buf, size_t count, loff_t off,
+zfs_file_pwrite(zfs_file_t *zfp, const void *buf, size_t count, loff_t off,
     uint8_t ashift, ssize_t *resid)
 {
 	(void) ashift;
-	return (zfs_file_write_impl(fp, buf, count, &off, resid));
+	return (zfs_file_write_impl(zfp, buf, count, &off, resid));
 }
 
 static int
-zfs_file_read_impl(zfs_file_t *fp, void *buf, size_t count, loff_t *offp,
+zfs_file_read_impl(struct file *fp, void *buf, size_t count, loff_t *offp,
     ssize_t *resid)
 {
 	ssize_t rc;
@@ -203,8 +206,9 @@ zfs_file_read_impl(zfs_file_t *fp, void *buf, size_t count, loff_t *offp,
 }
 
 int
-zfs_file_read(zfs_file_t *fp, void *buf, size_t count, ssize_t *resid)
+zfs_file_read(zfs_file_t *zfp, void *buf, size_t count, ssize_t *resid)
 {
+	struct file *fp = zfp;
 	loff_t off = fp->f_offset;
 	ssize_t rc;
 
@@ -215,15 +219,16 @@ zfs_file_read(zfs_file_t *fp, void *buf, size_t count, ssize_t *resid)
 }
 
 int
-zfs_file_pread(zfs_file_t *fp, void *buf, size_t count, loff_t off,
+zfs_file_pread(zfs_file_t *zfp, void *buf, size_t count, loff_t off,
     ssize_t *resid)
 {
-	return (zfs_file_read_impl(fp, buf, count, &off, resid));
+	return (zfs_file_read_impl(zfp, buf, count, &off, resid));
 }
 
 int
-zfs_file_seek(zfs_file_t *fp, loff_t *offp, int whence)
+zfs_file_seek(zfs_file_t *zfp, loff_t *offp, int whence)
 {
+	struct file *fp = zfp;
 	int rc;
 	struct thread *td;
 
@@ -237,8 +242,9 @@ zfs_file_seek(zfs_file_t *fp, loff_t *offp, int whence)
 }
 
 int
-zfs_file_getattr(zfs_file_t *fp, zfs_file_attr_t *zfattr)
+zfs_file_getattr(zfs_file_t *zfp, zfs_file_attr_t *zfattr)
 {
+	struct file *fp = zfp;
 	struct thread *td;
 	struct stat sb;
 	int rc;
@@ -279,8 +285,9 @@ drop:
 }
 
 int
-zfs_file_fsync(zfs_file_t *fp, int flags)
+zfs_file_fsync(zfs_file_t *zfp, int flags)
 {
+	struct file *fp = zfp;
 	if (fp->f_type != DTYPE_VNODE)
 		return (EINVAL);
 
@@ -295,8 +302,9 @@ zfs_file_fsync(zfs_file_t *fp, int flags)
  * len - length to zero or deallocate
  */
 int
-zfs_file_deallocate(zfs_file_t *fp, loff_t offset, loff_t len)
+zfs_file_deallocate(zfs_file_t *zfp, loff_t offset, loff_t len)
 {
+	struct file *fp = zfp;
 	int rc;
 #if __FreeBSD_version >= 1400029
 	struct thread *td;
@@ -325,20 +333,23 @@ zfs_file_get(int fd)
 }
 
 void
-zfs_file_put(zfs_file_t *fp)
+zfs_file_put(zfs_file_t *zfp)
 {
+	struct file *fp = zfp;
 	zfs_file_close(fp);
 }
 
 loff_t
-zfs_file_off(zfs_file_t *fp)
+zfs_file_off(zfs_file_t *zfp)
 {
+	struct file *fp = zfp;
 	return (fp->f_offset);
 }
 
 void *
-zfs_file_private(zfs_file_t *fp)
+zfs_file_private(zfs_file_t *zfp)
 {
+	struct file *fp = zfp;
 	file_t *tmpfp;
 	void *data;
 	int error;

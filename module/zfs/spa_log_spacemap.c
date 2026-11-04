@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -180,7 +170,7 @@
  * block size as we expect to be writing a lot of data to them at
  * once.
  */
-static const unsigned long zfs_log_sm_blksz = 1ULL << 17;
+static int zfs_log_sm_blksz = (1 << 17);
 
 /*
  * Percentage of the overall system's memory that ZFS allows to be
@@ -1342,6 +1332,7 @@ spa_ld_log_sm_data(spa_t *spa)
 	uint_t pn = 0;
 	uint64_t ps = 0;
 	uint64_t nsm = 0;
+	uint64_t nbytes = 0;
 	psls = sls = avl_first(&spa->spa_sm_logs_by_txg);
 	while (sls != NULL) {
 		/* Prefetch log spacemaps up to 16 TXGs or MBs ahead. */
@@ -1393,6 +1384,7 @@ spa_ld_log_sm_data(spa_t *spa)
 
 		pn--;
 		ps -= space_map_length(sls->sls_sm);
+		nbytes += space_map_length(sls->sls_sm);
 		nsm++;
 		space_map_close(sls->sls_sm);
 		sls->sls_sm = NULL;
@@ -1404,10 +1396,10 @@ spa_ld_log_sm_data(spa_t *spa)
 
 	hrtime_t read_logs_endtime = gethrtime();
 	spa_load_note(spa,
-	    "Read %lu log space maps (%llu total blocks - blksz = %llu bytes) "
+	    "Read %lu log space maps (%llu total blocks - %llu total bytes) "
 	    "in %lld ms", avl_numnodes(&spa->spa_sm_logs_by_txg),
 	    (u_longlong_t)spa_log_sm_nblocks(spa),
-	    (u_longlong_t)zfs_log_sm_blksz,
+	    (u_longlong_t)nbytes,
 	    (longlong_t)NSEC2MSEC(read_logs_endtime - read_logs_starttime));
 
 out:
@@ -1437,14 +1429,26 @@ out:
 	for (metaslab_t *m = avl_first(&spa->spa_metaslabs_by_flushed);
 	    m != NULL; m = AVL_NEXT(&spa->spa_metaslabs_by_flushed, m)) {
 		mutex_enter(&m->ms_lock);
-		m->ms_allocated_space = space_map_allocated(m->ms_sm) +
-		    zfs_range_tree_space(m->ms_unflushed_allocs) -
-		    zfs_range_tree_space(m->ms_unflushed_frees);
-
-		metaslab_space_update(m->ms_group,
-		    zfs_range_tree_space(m->ms_unflushed_allocs), 0, 0);
-		metaslab_space_update(m->ms_group,
-		    -zfs_range_tree_space(m->ms_unflushed_frees), 0, 0);
+		if (m->ms_load_state != METASLAB_LOAD_UNLOADABLE &&
+		    !m->ms_smp_alloc_invalid) {
+			uint64_t allocated = m->ms_allocated_space;
+			uint64_t allocs =
+			    zfs_range_tree_space(m->ms_unflushed_allocs);
+			uint64_t frees =
+			    zfs_range_tree_space(m->ms_unflushed_frees);
+			if (allocated > m->ms_size ||
+			    allocs > m->ms_size - allocated ||
+			    frees > allocated + allocs) {
+				metaslab_account_unavailable(m);
+			} else {
+				m->ms_allocated_space =
+				    allocated + allocs - frees;
+				metaslab_space_update(m->ms_group,
+				    allocs, 0, 0);
+				metaslab_space_update(m->ms_group,
+				    -frees, 0, 0);
+			}
+		}
 
 		ASSERT0(m->ms_weight & METASLAB_ACTIVE_MASK);
 		metaslab_recalculate_weight_and_sort(m);
@@ -1452,9 +1456,10 @@ out:
 		spa->spa_unflushed_stats.sus_memused +=
 		    metaslab_unflushed_changes_memused(m);
 
-		if (metaslab_debug_load && m->ms_sm != NULL) {
-			VERIFY0(metaslab_load(m));
-			metaslab_set_selected_txg(m, 0);
+		if ((metaslab_debug_load || m->ms_smp_alloc_invalid) &&
+		    m->ms_sm != NULL) {
+			if (metaslab_load(m) == 0)
+				metaslab_set_selected_txg(m, 0);
 		}
 		mutex_exit(&m->ms_lock);
 	}
@@ -1584,6 +1589,9 @@ ZFS_MODULE_PARAM(zfs, zfs_, max_log_walking, U64, ZMOD_RW,
 ZFS_MODULE_PARAM(zfs, zfs_, keep_log_spacemaps_at_export, INT, ZMOD_RW,
 	"Prevent the log spacemaps from being flushed and destroyed "
 	"during pool export/destroy");
+
+ZFS_MODULE_PARAM(zfs, zfs_, log_sm_blksz, INT, ZMOD_RW,
+	"Block size for the space maps used for the log space map feature");
 
 ZFS_MODULE_PARAM(zfs, zfs_, max_logsm_summary_length, U64, ZMOD_RW,
 	"Maximum number of rows allowed in the summary of the spacemap log");

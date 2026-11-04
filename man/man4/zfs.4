@@ -1,5 +1,14 @@
 .\" SPDX-License-Identifier: CDDL-1.0
 .\"
+.\" This file and its contents are supplied under the terms of the
+.\" Common Development and Distribution License ("CDDL"), version 1.0.
+.\" You may only use this file in accordance with the terms of version
+.\" 1.0 of the CDDL.
+.\"
+.\" A full copy of the text of the CDDL should have accompanied this
+.\" source.  A copy of the CDDL is also available via the Internet at
+.\" https://opensource.org/license/CDDL-1.0.
+.\"
 .\" Copyright (c) 2013 by Turbo Fredriksson <turbo@bayour.com>. All rights reserved.
 .\" Copyright (c) 2019, 2021 by Delphix. All rights reserved.
 .\" Copyright (c) 2019 Datto Inc.
@@ -7,20 +16,7 @@
 .\" Copyright (c) 2026, Mateusz Piotrowski <0mp@FreeBSD.org>
 .\" Copyright (c) 2026, TrueNAS.
 .\"
-.\" The contents of this file are subject to the terms of the Common Development
-.\" and Distribution License (the "License").  You may not use this file except
-.\" in compliance with the License. You can obtain a copy of the license at
-.\" usr/src/OPENSOLARIS.LICENSE or https://opensource.org/licenses/CDDL-1.0.
-.\"
-.\" See the License for the specific language governing permissions and
-.\" limitations under the License. When distributing Covered Code, include this
-.\" CDDL HEADER in each file and include the License file at
-.\" usr/src/OPENSOLARIS.LICENSE.  If applicable, add the following below this
-.\" CDDL HEADER, with the fields enclosed by brackets "[]" replaced with your
-.\" own identifying information:
-.\" Portions Copyright [yyyy] [name of copyright owner]
-.\"
-.Dd July 12, 2026
+.Dd September 9, 2026
 .Dt ZFS 4
 .Os
 .
@@ -297,6 +293,15 @@ For blocks that could be forced to be a gang block (due to
 .Sy metaslab_force_ganging ) ,
 force this many of them to be gang blocks.
 .
+.It Sy metaslab_verify_weight_delay_ms Ns = Ns Sy 0 Ns ms Pq uint
+When non-zero and
+.Sy zfs_flags
+includes
+.Sy ZFS_DEBUG_METASLAB_VERIFY ,
+delay the verification of an active metaslab's weight during a log space map
+flush by this many milliseconds.
+This option is used by the test suite to trigger race conditions.
+.
 .It Sy brt_zap_prefetch Ns = Ns Sy 1 Ns | Ns 0 Pq int
 Controls prefetching BRT records for blocks which are going to be cloned.
 .
@@ -349,6 +354,12 @@ This applies primarily to
 .
 .It Sy zfs_keep_log_spacemaps_at_export Ns = Ns Sy 0 Ns | Ns 1 Pq int
 Prevent log spacemaps from being destroyed during pool exports and destroys.
+.
+.It Sy zfs_log_sm_blksz Ns = Ns Sy 131072 Ns B Po 128 KiB Pc Pq int
+This is used as the block size for the space maps used for the
+log space map feature.
+These space maps benefit from a bigger block size
+as we expect to be writing a lot of data to them at once.
 .
 .It Sy zfs_metaslab_segment_weight_enabled Ns = Ns Sy 1 Ns | Ns 0 Pq int
 Enable/disable segment-based metaslab selection.
@@ -505,7 +516,12 @@ but this may negatively impact pool space efficiency.
 .It Sy zfs_vdev_direct_write_verify Ns = Ns Sy Linux 1 | FreeBSD 0 Pq uint
 If non-zero, then a Direct I/O write's checksum will be verified every
 time the write is issued and before it is committed to the block pointer.
-In the event the checksum is not valid then the I/O operation will return EIO.
+If the checksum is not valid, the block is not committed and ZFS writes
+the request again from a private copy of the data.
+If the checksum of the copy is also not valid, the I/O operation will
+return EIO.
+On Linux, ZFS also copies the data of every later Direct I/O write
+through the same open file.
 This module parameter can be used to detect if the
 contents of the users buffer have changed in the process of doing a Direct I/O
 write.
@@ -535,6 +551,16 @@ and are recovering a damaged label.
 .
 .It Sy zfs_vdev_ms_count_limit Ns = Ns Sy 131072 Po 128k Pc Pq uint
 Practical upper limit of total metaslabs per top-level vdev.
+.
+.It Sy zfs_vdev_dtl_sm_blksz Ns = Ns Sy 4096 Ns B Po 4 KiB Pc Pq int
+Since the DTL space map of a vdev is not expected to have a lot of
+entries, we default its block size to 4K.
+.
+.It Sy zfs_vdev_standard_sm_blksz Ns = Ns Sy 131072 Ns B Po 128 KiB Pc Pq int
+vdev-wide space maps that have lots of entries written to them at
+the end of each transaction can benefit from a higher I/O bandwidth
+.Pq e.g. Sy vdev_obsolete_sm ,
+thus we default their block size to 128K.
 .
 .It Sy metaslab_preload_enabled Ns = Ns Sy 1 Ns | Ns 0 Pq int
 Enable metaslab group preloading.
@@ -615,8 +641,10 @@ Whether to traverse data blocks during an "extreme rewind"
 .Pq Fl X
 import.
 .Pp
-An extreme rewind import normally performs a full traversal of all
-blocks in the pool for verification.
+Data blocks are traversed only if the number of errors found in them is going
+to be reported, like during a dry run
+.Pq Fl nX ,
+since an actual rewind tolerates any number of them.
 If this parameter is unset, the traversal skips non-metadata blocks.
 It can be toggled once the
 import has started to stop or start the traversal of non-metadata blocks.
@@ -719,6 +747,27 @@ Logical ashift for file-based devices.
 .
 .It Sy vdev_file_physical_ashift Ns = Ns Sy 9 Po 512 B Pc Pq u64
 Physical ashift for file-based devices.
+.
+.It Sy vdev_anyraid_min_tile_size Ns = Ns Sy 16 GiB Pq u64
+Minimum size of the tiles that anyraid will use to do its mapping.
+Smaller tile sizes let data be spread more evenly across devices, and makes
+smaller devices use more of their capacity.
+Larger tile sizes allow for larger disks to be used in the future, since a given
+device can only store 65536 tiles.
+The minimum valid tile size is 16MiB, since a metaslab always needs to be able
+to fit in a single tile.
+Note that any disk that is smaller than the tile size plus the size of the
+anyraid map (260MiB) cannot be added to an anyraid vdev.
+.
+.It Sy vdev_anyraid_disk_shift Ns = Ns Sy 6 GiB Pq int
+Power of two divisor for the default size of AnyRAID tiles.
+ZFS takes the size of the smallest disk in the AnyRAID vdev when it
+is created and divides it by two to this power to get the tilesize for that
+vdev.
+Because the maximum number of tiles on a single device is 65536, increasing this
+value can make the anyraid vdev able to handle larger devices in the future.
+Decreasing the value can reduce space waste at the end of the device, if the
+usable device size does not nicely divide into tiles.
 .
 .It Sy zap_iterate_prefetch Ns = Ns Sy 1 Ns | Ns 0 Pq int
 If set, when we start iterating over a ZAP object,
@@ -1567,6 +1616,8 @@ Note that for small files this may be slower than simply copying the file.
 When set to 0 the clone operation will immediately fail if it encounters
 any dirty blocks.
 By default waiting is enabled.
+A FIDEDUPERANGE request always waits, as it has no copy fallback that
+could absorb the failure.
 .
 .It Sy zfs_blake3_impl Ns = Ns Sy fastest Pq string
 Select a BLAKE3 implementation.
@@ -1793,6 +1844,31 @@ support for snapshot mounts triggered by access to the
 directory by setting the
 .Em nosuid
 mount option.
+.
+.It Sy zfs_sb_uuid Ns = Ns Sy 1 Ns | Ns 0 Pq int
+Set the filesystem UUID of a filesystem, snapshot, or clone at mount time,
+from the pool GUID and the dataset GUID, as the
+.Sy guid
+property in
+.Xr zfsprops 7
+describes.
+Set to
+.Sy 0
+to leave the UUID null, as releases without this parameter did, for example
+when stale overlayfs file handles block a mount after an upgrade; see the
+.Sx Filesystem UUIDs and Overlayfs
+section of
+.Xr zpool-reguid 8 .
+A change applies to the filesystems that are mounted after the change.
+For the filesystems that mount at boot, set the parameter before the first
+mount, on the kernel command line as
+.Sy zfs.zfs_sb_uuid=0
+or in a
+.Pa modprobe.d
+file as
+.Sy options zfs zfs_sb_uuid=0 .
+When the root filesystem is on ZFS, the initramfs must include that file.
+This parameter only applies on Linux.
 .
 .It Sy zfs_flags Ns = Ns Sy 0 Pq int
 Set additional debugging flags.
@@ -2423,6 +2499,25 @@ This setting will not reduce the write size below a single block.
 Capped at a maximum of
 .Sy 32 MiB .
 .
+.It Sy zfs_recv_defer_batch_size Ns = Ns Sy 33554432 Ns B Po 32 MiB Pc Pq uint
+When a non-raw incremental stream reallocates an object at a different
+dnode size,
+.Nm zfs Cm receive
+must wait for the old dnode's free to be written out before the object
+number can be reused.
+Rather than forcing one transaction group sync per reallocated object,
+affected records are parked, up to this many bytes at a time, and applied
+together behind a single sync.
+Parked records hold their payloads in memory, so a receive may use up to
+this much memory in addition to
+.Sy zfs_recv_queue_length .
+While records are parked, the saved resume state is held back at the first
+parked record, so interrupting a receive can require resending up to this
+much of the stream.
+Setting this to
+.Sy 0
+restores the previous behavior of one sync per reallocated object.
+.
 .It Sy zfs_recv_best_effort_corrective Ns = Ns Sy 0 Pq int
 When this variable is set to non-zero a corrective receive:
 .Bl -enum -compact -offset 4n -width "1."
@@ -2714,6 +2809,12 @@ using LZ4 and zstd-1 passes is enabled.
 Minimal uncompressed size (inclusive) of a record before the early abort
 heuristic will be attempted.
 .
+.It Sy zio_batch_enabled Ns = Ns Sy 1 Ns | Ns 0 Pq int
+Collect the vdev children of a RAIDZ, dRAID or mirror I/O operation as they
+complete, and process all of their completions on a single thread once the
+last of them is in, rather than one thread each.
+Applies only to children that bypass the vdev I/O queue.
+.
 .It Sy zio_deadman_log_all Ns = Ns Sy 0 Ns | Ns 1 Pq int
 If non-zero, the zio deadman will produce debugging messages
 .Pq see Sy zfs_dbgmsg_enable
@@ -2914,9 +3015,9 @@ for each I/O submitter.
 When unset, requests are handled asynchronously by a thread pool.
 The number of requests which can be handled concurrently is controlled by
 .Sy zvol_threads .
-.Sy zvol_request_sync
-is ignored when running on a kernel that supports block multiqueue
-.Pq Li blk-mq .
+This parameter applies regardless of the
+.Sy zvol_use_blk_mq
+setting.
 .
 .It Sy zvol_num_taskqs Ns = Ns Sy 0 Pq uint
 Number of zvol taskqs.

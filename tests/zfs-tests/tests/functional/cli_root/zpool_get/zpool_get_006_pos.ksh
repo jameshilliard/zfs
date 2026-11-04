@@ -1,24 +1,14 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -70,6 +60,38 @@ pool=$TESTPOOL1
 function get_class_prop
 {
 	get_pool_prop "class_${1}_${2}" $pool
+}
+
+# Read all space properties of a class with one zpool get, so that they
+# agree with each other. Separate reads can see a transaction group sync
+# in between, and then compare values from different points in time.
+typeset -il size cap free alloc avail usable used
+typeset expandsz frag
+function get_class_props
+{
+	typeset c="class_$1" props="" p prop value
+	typeset -i n=0
+
+	for p in size capacity free allocated available usable used \
+	    expandsize fragmentation; do
+		props="${props:+$props,}${c}_$p"
+	done
+	zpool get -Hp -o property,value $props $pool |
+	while read -r prop value; do
+		case ${prop#${c}_} in
+		size)		size=$value ;;
+		capacity)	cap=$value ;;
+		free)		free=$value ;;
+		allocated)	alloc=$value ;;
+		available)	avail=$value ;;
+		usable)		usable=$value ;;
+		used)		used=$value ;;
+		expandsize)	expandsz=$value ;;
+		fragmentation)	frag=$value ;;
+		esac
+		(( n += 1 ))
+	done
+	(( n == 9 )) || log_fail "zpool get returned $n of 9 $c properties"
 }
 
 # Wrapper for test to give more context to logs
@@ -207,15 +229,7 @@ log_must zfs create \
 writefiles normal
 sync_pool $pool
 for class in "${classes[@]}"; do
-	typeset -il size=$(get_class_prop $class size)
-	typeset -i cap=$(get_class_prop $class capacity)
-	typeset -il free=$(get_class_prop $class free)
-	typeset -il alloc=$(get_class_prop $class allocated)
-	typeset -il avail=$(get_class_prop $class available)
-	typeset -il usable=$(get_class_prop $class usable)
-	typeset -il used=$(get_class_prop $class used)
-	typeset expandsz=$(get_class_prop $class expandsize)
-	typeset frag=$(get_class_prop $class fragmentation)
+	get_class_props $class
 	case $class in
 	normal)
 		check_raidz_used
@@ -235,15 +249,7 @@ log_must zfs create \
     $pool/elog
 writefiles elog
 for class in "${classes[@]}"; do
-	typeset -il size=$(get_class_prop $class size)
-	typeset -i cap=$(get_class_prop $class capacity)
-	typeset -il free=$(get_class_prop $class free)
-	typeset -il alloc=$(get_class_prop $class allocated)
-	typeset -il avail=$(get_class_prop $class available)
-	typeset -il usable=$(get_class_prop $class usable)
-	typeset -il used=$(get_class_prop $class used)
-	typeset expandsz=$(get_class_prop $class expandsize)
-	typeset frag=$(get_class_prop $class fragmentation)
+	get_class_props $class
 	case $class in
 	normal)
 		check_raidz_used
@@ -267,15 +273,7 @@ log_must zfs create \
 writefiles special
 sync_pool $pool
 for class in "${classes[@]}"; do
-	typeset -il size=$(get_class_prop $class size)
-	typeset -i cap=$(get_class_prop $class capacity)
-	typeset -il free=$(get_class_prop $class free)
-	typeset -il alloc=$(get_class_prop $class allocated)
-	typeset -il avail=$(get_class_prop $class available)
-	typeset -il usable=$(get_class_prop $class usable)
-	typeset -il used=$(get_class_prop $class used)
-	typeset expandsz=$(get_class_prop $class expandsize)
-	typeset frag=$(get_class_prop $class fragmentation)
+	get_class_props $class
 	case $class in
 	normal|special)
 		check_raidz_used
@@ -299,15 +297,7 @@ log_must zfs create \
     $pool/special_elog
 writefiles special_elog
 for class in "${classes[@]}"; do
-	typeset -il size=$(get_class_prop $class size)
-	typeset -i cap=$(get_class_prop $class capacity)
-	typeset -il free=$(get_class_prop $class free)
-	typeset -il alloc=$(get_class_prop $class allocated)
-	typeset -il avail=$(get_class_prop $class available)
-	typeset -il usable=$(get_class_prop $class usable)
-	typeset -il used=$(get_class_prop $class used)
-	typeset expandsz=$(get_class_prop $class expandsize)
-	typeset frag=$(get_class_prop $class fragmentation)
+	get_class_props $class
 	case $class in
 	normal|special)
 		check_raidz_used
@@ -330,15 +320,7 @@ log_must zfs create \
     $pool/log
 writefiles log
 for class in "${classes[@]}"; do
-	typeset -il size=$(get_class_prop $class size)
-	typeset -i cap=$(get_class_prop $class capacity)
-	typeset -il free=$(get_class_prop $class free)
-	typeset -il alloc=$(get_class_prop $class allocated)
-	typeset -il avail=$(get_class_prop $class available)
-	typeset -il usable=$(get_class_prop $class usable)
-	typeset -il used=$(get_class_prop $class used)
-	typeset expandsz=$(get_class_prop $class expandsize)
-	typeset frag=$(get_class_prop $class fragmentation)
+	get_class_props $class
 	case $class in
 	normal|special)
 		check_raidz_used
@@ -365,15 +347,7 @@ log_must zfs create \
 writefiles dedup $((3 * nfiles))
 sync_pool $pool
 for class in "${classes[@]}"; do
-	typeset -il size=$(get_class_prop $class size)
-	typeset -i cap=$(get_class_prop $class capacity)
-	typeset -il free=$(get_class_prop $class free)
-	typeset -il alloc=$(get_class_prop $class allocated)
-	typeset -il avail=$(get_class_prop $class available)
-	typeset -il usable=$(get_class_prop $class usable)
-	typeset -il used=$(get_class_prop $class used)
-	typeset expandsz=$(get_class_prop $class expandsize)
-	typeset frag=$(get_class_prop $class fragmentation)
+	get_class_props $class
 	case $class in
 	normal|special)
 		check_raidz_used

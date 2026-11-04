@@ -1,16 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * This file and its contents are supplied under the terms of the Common
- * Development and Distribution License ("CDDL"), version 1.0. You may only use
- * this file in accordance with the terms of version 1.0 of the CDDL.
- *
- * A full copy of the text of the CDDL should have accompanied this source. A
- * copy of the CDDL is also available via the Internet at
- * http://www.illumos.org/license/CDDL.
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -37,6 +34,8 @@ typedef struct {
 	int	nesting;
 	uint64_t featureflags;
 	boolean_t begin_spill;
+	boolean_t compound;
+	boolean_t concluded;
 } validate_context_t;
 
 static validate_context_t 	contexts[MAX_VALIDATIONS];
@@ -87,34 +86,54 @@ chain_validate_records(void *item_in, void *context_in)
 	if (OPTION_ENABLED(CA_DO_NOT_VALIDATE))
 		return (D_OK);
 
+	if (context->concluded) {
+		errx(1, "record after compound stream conclusion "
+		    "at offset %llu", (u_longlong_t)item->dp_stream_offset);
+	}
+
 	if (item->dp_stream_offset == 0 && drr->drr_type != DRR_BEGIN) {
 		warnx("warning - first record is not DRR_BEGIN");
 	}
 
 	if (drr->drr_type == DRR_BEGIN) {
-		VERIFY0(context->nesting);
+		if (context->nesting != 0) {
+			errx(1, "nested DRR_BEGIN record at offset %llu",
+			    (u_longlong_t)item->dp_stream_offset);
+		}
 		context->nesting++;
+		if (item->dp_stream_offset == 0) {
+			context->compound = DMU_GET_STREAM_HDRTYPE(
+			    drr->drr_u.drr_begin.drr_versioninfo) ==
+			    DMU_COMPOUNDSTREAM;
+		}
 		context->featureflags = DMU_GET_FEATUREFLAGS(
 		    drr->drr_u.drr_begin.drr_versioninfo);
 		context->begin_spill = !!(drr->drr_u.drr_begin.drr_flags &
 		    DRR_FLAG_SPILL_BLOCK);
 	} else if (drr->drr_type == DRR_END) {
 		VERIFY3S(context->nesting, >=, 0);
-		if (context->nesting > 0)
+		if (context->nesting > 0) {
 			context->nesting--;
+		} else if (context->compound &&
+		    IS_CONCLUSION(drr, DRR_END)) {
+			context->concluded = B_TRUE;
+		} else {
+			errx(1, "DRR_END record outside a stream "
+			    "at offset %llu",
+			    (u_longlong_t)item->dp_stream_offset);
+		}
 	} else if (drr->drr_type >= DRR_NUMTYPES) {
 		errx(1, "unknown record type: %d", drr->drr_type);
 	} else {
-		VERIFY3S(context->nesting, ==, 1);
+		if (context->nesting != 1) {
+			errx(1, "record outside a stream at offset %llu",
+			    (u_longlong_t)item->dp_stream_offset);
+		}
 	}
 
 	is_raw = validate_stream_has_feature(context, DMU_BACKUP_FEATURE_RAW);
 
 	switch (drr->drr_type) {
-
-	case DRR_BEGIN:
-		VERIFY3U(item->dp_payload_size, <=, 1UL << 28);
-		break;
 
 	case DRR_OBJECT:
 		err = recv_check_drr_object(drro, NULL, is_raw,
@@ -174,6 +193,8 @@ serial_validate_records(void)
 	context->nesting = 0;
 	context->featureflags = 0;
 	context->begin_spill = B_FALSE;
+	context->compound = B_FALSE;
+	context->concluded = B_FALSE;
 
 	chain_step_t step = {
 		.cs_type = CS_SERIAL,

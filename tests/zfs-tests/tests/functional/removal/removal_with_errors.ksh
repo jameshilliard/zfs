@@ -1,8 +1,6 @@
 #! /bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
-#
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
 # You may only use this file in accordance with the terms of version
@@ -10,9 +8,7 @@
 #
 # A full copy of the text of the CDDL should have accompanied this
 # source.  A copy of the CDDL is also available via the Internet at
-# http://www.illumos.org/license/CDDL.
-#
-# CDDL HEADER END
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -101,6 +97,11 @@ log_must zinject -c all
 # Flush the ARC to minimize cache effects.
 log_must zpool export $TESTPOOL
 log_must zpool import -d $DISKDIR $TESTPOOL
+
+# The injected errors above also failed writes to $DISK0, which must be
+# resilvered before mirror-0 may be removed again.
+log_must wait_resilvered $TESTPOOL
+log_must zpool wait -t resilver $TESTPOOL
 
 # Verify that unexpected write errors automatically cancel the removal.
 log_must zinject -d $DISK3 -e io -T all -f 100 $TESTPOOL

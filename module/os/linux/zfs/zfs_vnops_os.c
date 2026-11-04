@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -231,8 +221,6 @@ zfs_close(struct inode *ip, int flag, cred_t *cr)
 	return (0);
 }
 
-#if defined(_KERNEL)
-
 static int zfs_fillpage(struct inode *ip, struct page *pp);
 
 /*
@@ -364,8 +352,6 @@ mappedread(znode_t *zp, int nbytes, zfs_uio_t *uio)
 
 	return (error);
 }
-#endif /* _KERNEL */
-
 static unsigned long zfs_delete_blocks = DMU_MAX_DELETEBLKCNT;
 
 /*
@@ -735,8 +721,7 @@ top:
 			goto out;
 		have_acl = B_TRUE;
 
-		if (S_ISREG(vap->va_mode) || S_ISDIR(vap->va_mode))
-			projid = zfs_inherit_projid(dzp);
+		projid = zfs_inherit_projid(dzp);
 		if (zfs_acl_ids_overquota(zfsvfs, &acl_ids, projid)) {
 			zfs_acl_ids_free(&acl_ids);
 			error = SET_ERROR(EDQUOT);
@@ -850,17 +835,18 @@ out:
 	if (dl)
 		zfs_dirent_unlock(dl);
 
-	if (error) {
-		if (zp)
-			zrele(zp);
-	} else {
+	if (error == 0) {
 		zfs_znode_update_vfs(dzp);
 		zfs_znode_update_vfs(zp);
-		*zpp = zp;
+
+		if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
+			error = zil_commit(zilog, 0);
 	}
 
-	if (error == 0 && zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
-		error = zil_commit(zilog, 0);
+	if (error == 0)
+		*zpp = zp;
+	else if (zp != NULL)
+		zrele(zp);
 
 	zfs_exit(zfsvfs, FTAG);
 	return (error);
@@ -935,8 +921,7 @@ top:
 		goto out;
 	have_acl = B_TRUE;
 
-	if (S_ISREG(vap->va_mode) || S_ISDIR(vap->va_mode))
-		projid = zfs_inherit_projid(dzp);
+	projid = zfs_inherit_projid(dzp);
 	if (zfs_acl_ids_overquota(zfsvfs, &acl_ids, projid)) {
 		zfs_acl_ids_free(&acl_ids);
 		error = SET_ERROR(EDQUOT);
@@ -1412,8 +1397,6 @@ top:
 	if (fuid_dirtied)
 		zfs_fuid_sync(zfsvfs, tx);
 
-	*zpp = zp;
-
 	txtype = zfs_log_create_txtype(Z_DIR, vsecp, vap);
 	if (flags & FIGNORECASE)
 		txtype |= TX_CI;
@@ -1427,16 +1410,19 @@ out:
 
 	zfs_dirent_unlock(dl);
 
-	if (error != 0) {
-		zrele(zp);
-	} else {
+	if (error == 0) {
 		zfs_znode_update_vfs(dzp);
 		zfs_znode_update_vfs(zp);
 
 		if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
 			error = zil_commit(zilog, 0);
-
 	}
+
+	if (error == 0)
+		*zpp = zp;
+	else
+		zrele(zp);
+
 	zfs_exit(zfsvfs, FTAG);
 	return (error);
 }
@@ -1785,16 +1771,66 @@ zfs_getattr_fast(zidmap_t *idmap, u32 request_mask, struct inode *ip,
 		sp->blksize = zfsvfs->z_max_blksz;
 	}
 
+#ifdef STATX_CHANGE_COOKIE
+	if (request_mask & STATX_CHANGE_COOKIE) {
+		/*
+		 * knfsd uses the STATX_CHANGE_COOKIE to surface to clients
+		 * change_info4 data, which is used to implement NFS client
+		 * name caching (see RFC 8881 Section 10.8). This number
+		 * should always increase with changes and should not be
+		 * reused. We cannot simply present ctime here because
+		 * ZFS uses a coarse timer to set them, which may cause
+		 * clients to fail to detect changes and invalidate cache.
+		 *
+		 * z_seq is a per-file 64-bit counter bumped on every change
+		 * and persisted across znode eviction, so it is presented
+		 * directly as a monotonic change cookie. Files that predate
+		 * persistence are seeded from ctime on load so the cookie
+		 * never moves backward across the upgrade.
+		 *
+		 * STATX_ATTR_CHANGE_MONOTONIC is advertised
+		 * to prevent knfsd from generating the change cookie
+		 * based on ctime. C.f. nfsd4_change_attribute in
+		 * fs/nfsd/nfsfh.c.
+		 *
+		 * The cookie is read here, under z_lock and the teardown
+		 * lock. setattr, ACL changes and link/unlink store their
+		 * changes and bump z_seq under z_lock, so the cookie
+		 * returned always matches the attributes returned with it.
+		 */
+		sp->change_cookie = atomic_load_64(&zp->z_seq);
+		sp->attributes |= STATX_ATTR_CHANGE_MONOTONIC;
+		sp->result_mask |= STATX_CHANGE_COOKIE;
+	}
+#endif
+
 	mutex_exit(&zp->z_lock);
+
+#ifdef STATX_BTIME
+	if (request_mask & STATX_BTIME) {
+		sp->btime = zp->z_btime;
+		sp->result_mask |= STATX_BTIME;
+	}
+#endif
 
 	/*
 	 * Required to prevent NFS client from detecting different inode
 	 * numbers of snapshot root dentry before and after snapshot mount.
+	 * Likewise report the snapshot creation time as the birth time,
+	 * matching the unmounted '.zfs/snapshot/<name>' directory.
 	 */
 	if (zfsvfs->z_issnap) {
-		if (ip->i_sb->s_root->d_inode == ip)
+		if (ip->i_sb->s_root->d_inode == ip) {
 			sp->ino = ZFSCTL_INO_SNAPDIRS -
 			    dmu_objset_id(zfsvfs->z_os);
+#ifdef STATX_BTIME
+			if (request_mask & STATX_BTIME) {
+				sp->btime.tv_sec = dsl_get_creation(
+				    dmu_objset_ds(zfsvfs->z_os));
+				sp->btime.tv_nsec = 0;
+			}
+#endif
+		}
 	}
 
 	zfs_exit(zfsvfs, FTAG);
@@ -3016,8 +3052,16 @@ top:
 	 * not only the project ID, but also the ZFS_PROJINHERIT flag. Under
 	 * such case, we only allow renames into our tree when the project
 	 * IDs are the same.
+	 *
+	 * A rename within a single directory leaves the object exactly where
+	 * it already is, so it cannot move it between projects and is always
+	 * allowed.  Objects created before symlinks and other non-regular
+	 * files began inheriting a project ID carry none of their own, and
+	 * would otherwise not be renameable within the very directory that
+	 * holds them -- which breaks "ln -sfn", implemented as
+	 * create-under-a-temporary-name-then-rename.
 	 */
-	if (tdzp->z_pflags & ZFS_PROJINHERIT &&
+	if (sdzp != tdzp && tdzp->z_pflags & ZFS_PROJINHERIT &&
 	    tdzp->z_projid != szp->z_projid) {
 		error = SET_ERROR(EXDEV);
 		goto out;
@@ -3078,11 +3122,8 @@ top:
 
 	/* Set up inode creation for RENAME_WHITEOUT. */
 	if (rflags & RENAME_WHITEOUT) {
-		/*
-		 * Whiteout files are not regular files or directories, so to
-		 * match zfs_create() we do not inherit the project id.
-		 */
-		uint64_t wo_projid = ZFS_DEFAULT_PROJID;
+		/* Match zfs_create(): the whiteout joins its directory. */
+		uint64_t wo_projid = zfs_inherit_projid(sdzp);
 
 		error = zfs_zaccess_idmap(sdzp, ACE_ADD_FILE, 0, B_FALSE,
 		    cr, idmap);
@@ -3419,7 +3460,7 @@ top:
 		return (error);
 	}
 
-	if (zfs_acl_ids_overquota(zfsvfs, &acl_ids, ZFS_DEFAULT_PROJID)) {
+	if (zfs_acl_ids_overquota(zfsvfs, &acl_ids, zfs_inherit_projid(dzp))) {
 		zfs_acl_ids_free(&acl_ids);
 		zfs_dirent_unlock(dl);
 		zfs_exit(zfsvfs, FTAG);
@@ -3496,14 +3537,13 @@ top:
 
 	zfs_dirent_unlock(dl);
 
-	if (error == 0) {
-		*zpp = zp;
+	if (error == 0 && zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
+		error = zil_commit(zilog, 0);
 
-		if (zfsvfs->z_os->os_sync == ZFS_SYNC_ALWAYS)
-			error = zil_commit(zilog, 0);
-	} else {
+	if (error == 0)
+		*zpp = zp;
+	else
 		zrele(zp);
-	}
 
 	zfs_exit(zfsvfs, FTAG);
 	return (error);
@@ -4488,7 +4528,6 @@ zfs_fid(struct inode *ip, fid_t *fidp)
 	return (0);
 }
 
-#if defined(_KERNEL)
 EXPORT_SYMBOL(zfs_open);
 EXPORT_SYMBOL(zfs_close);
 EXPORT_SYMBOL(zfs_lookup);
@@ -4514,4 +4553,3 @@ EXPORT_SYMBOL(zfs_map);
 
 module_param(zfs_delete_blocks, ulong, 0644);
 MODULE_PARM_DESC(zfs_delete_blocks, "Delete files larger than N blocks async");
-#endif

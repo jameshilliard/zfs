@@ -8,7 +8,7 @@
 #
 # A full copy of the text of the CDDL should have accompanied this
 # source.  A copy of the CDDL is also available via the Internet at
-# http://www.illumos.org/license/CDDL.
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -24,5 +24,6 @@ DISK=${DISKS%% *}
 TESTPOOLDISK=${DISKS%% *}
 TESTPOOL2DISK=${DISKS##* }
 
-default_setup ${TESTPOOLDISK}
-create_pool testpool2 ${TESTPOOL2DISK}
+default_setup_noexit ${TESTPOOLDISK}
+log_must create_pool testpool2 ${TESTPOOL2DISK}
+log_pass

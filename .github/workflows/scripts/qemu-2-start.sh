@@ -44,11 +44,11 @@ case "$OS" in
     OSv="almalinux9"
     URL="https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-latest.x86_64.qcow2"
     ;;
-  alpine3-24)
-    OSNAME="Alpine Linux 3.24.1"
+  alpine3-24*)
+    OSNAME="Alpine Linux 3.24.2"
     # Alpine Linux v3.22 and v3.23 are unknown to osinfo as of 2025-12-26.
     OSv="alpinelinux3.21"
-    URL="https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-x86_64-bios-cloudinit-r0.qcow2"
+    URL="https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/alpine-3.24.2-x86_64-cloudinit-r2.qcow2"
     ;;
   archlinux)
     OSNAME="Archlinux"
@@ -100,6 +100,11 @@ case "$OS" in
     OSv="fedora-unknown"
     URL="https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
     ;;
+  fedora45)
+    OSNAME="Fedora 45"
+    OSv="fedora-unknown"
+    URL="https://download.fedoraproject.org/pub/fedora/linux/releases/45/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-45-1.4.x86_64.qcow2"
+    ;;
   freebsd14-4r)
     FreeBSD="14.4-RELEASE"
     OSNAME="FreeBSD $FreeBSD"
@@ -114,8 +119,8 @@ case "$OS" in
     URLxz="$FREEBSD_REL/$FreeBSD/amd64/Latest/FreeBSD-$FreeBSD-amd64-BASIC-CI-ufs.raw.xz"
     KSRC="$FREEBSD_REL/../amd64/$FreeBSD/src.txz"
     ;;
-  freebsd14-4s)
-    FreeBSD="14.4-STABLE"
+  freebsd14-5s)
+    FreeBSD="14.5-STABLE"
     OSNAME="FreeBSD $FreeBSD"
     OSv="freebsd14.0"
     URLxz="$FREEBSD_SNAP/$FreeBSD/amd64/Latest/FreeBSD-$FreeBSD-amd64-BASIC-CI-ufs.raw.xz"
@@ -304,10 +309,12 @@ fi
 sudo virsh net-update default add ip-dhcp-host \
   "<host mac='52:54:00:83:79:00' ip='192.168.122.10'/>" --live --config
 
+# 2026-09-20: -amx-tile works around objtool vs musl SIGSTKSZ on AMX
+# hosts.  Removable once a fixed objtool reaches the distro images.
 sudo virt-install \
   --os-variant $OSv \
   --name "openzfs" \
-  --cpu host-passthrough \
+  --cpu host-passthrough,-amx-tile \
   --virt-type=kvm --hvm \
   --vcpus=4,sockets=1 \
   --memory $((1024*12)) \
@@ -360,6 +367,11 @@ else
   scp ~/.ssh/id_ed25519.pub "root@vm0:~zfs/.ssh/authorized_keys"
   ssh root@vm0 'chown -R zfs ~zfs'
   ssh root@vm0 'service sshd restart'
+  # The restart can return before sshd is accepting connections again.
+  for ((i=0; i<30; i++)); do
+    ssh 2>/dev/null root@vm0 true && break
+    sleep 1
+  done
   scp ~/src.txz "root@vm0:/tmp/src.txz"
   ssh root@vm0 'tar -C / -zxf /tmp/src.txz'
 fi
@@ -371,6 +383,13 @@ if [ ${OS:0:6} == "alpine" ]; then
   while pidof /usr/bin/qemu-system-x86_64 >/dev/null; do
     ssh 2>/dev/null zfs@vm0 "uname -a" && break
   done
+  # The image's Limine updater configs use old key names that the limine
+  # from the upgrade below ignores, which breaks its BIOS boot hook.
+  ssh zfs@vm0 "echo 'BOOT_DEVICE=/dev/vda' | sudo tee /etc/limine/limine-bios-updater.conf"
+  ssh zfs@vm0 "echo 'boot_device=/dev/vda' | sudo tee -a /etc/limine/limine-bios-updater.conf"
+  ssh zfs@vm0 "echo 'EFI_FILE=BOOTX64.EFI' | sudo tee /etc/limine/limine-efi-updater.conf"
+  ssh zfs@vm0 "echo 'efi_file=BOOTX64.EFI' | sudo tee -a /etc/limine/limine-efi-updater.conf"
+  ssh zfs@vm0 "echo 'efi_system_partition=/boot' | sudo tee -a /etc/limine/limine-efi-updater.conf"
   # Enable community and testing repositories.
   ssh zfs@vm0 "sudo rm -rf /etc/apk/repositories"
   ssh zfs@vm0 "sudo setup-apkrepos -c1"

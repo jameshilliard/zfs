@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
@@ -27,6 +17,7 @@
 
 /*
  * Copyright (c) 2013, 2017 by Delphix. All rights reserved.
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -165,9 +156,11 @@ zil_prt_rec_write(zilog_t *zilog, int txtype, const void *arg)
 	int verbose = MAX(dump_opt['d'], dump_opt['i']);
 	int error;
 
-	(void) printf("%sfoid %llu, offset %llx, length %llx\n", tab_prefix,
-	    (u_longlong_t)lr->lr_foid, (u_longlong_t)lr->lr_offset,
-	    (u_longlong_t)lr->lr_length);
+	(void) printf("%sfoid %llu, offset %llx, length %llx%s%s\n",
+	    tab_prefix, (u_longlong_t)lr->lr_foid,
+	    (u_longlong_t)lr->lr_offset, (u_longlong_t)lr->lr_length,
+	    (lr->lr_flags & LR_WRITE_CONT) ? ", continued" : "",
+	    (lr->lr_flags & LR_WRITE_MORE) ? ", more follows" : "");
 
 	if (txtype == TX_WRITE2 || verbose < 4)
 		return;
@@ -317,11 +310,9 @@ zil_prt_rec_setsaxattr(zilog_t *zilog, int txtype, const void *arg)
 		(void) printf("%sXAT_VALUE  NULL\n", tab_prefix);
 	} else {
 		(void) printf("%sXAT_VALUE  ", tab_prefix);
-		const char *val = (const char *)&lr->lr_data[strlen(name) + 1];
-		for (int i = 0; i < lr->lr_size; i++) {
-			(void) printf("%c", *val);
-			val++;
-		}
+		dump_xattr_value(&lr->lr_data[strlen(name) + 1],
+		    lr->lr_size);
+		(void) printf("\n");
 	}
 }
 

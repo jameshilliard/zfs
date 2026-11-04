@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -478,6 +468,29 @@ spa_config_lock_destroy(spa_t *spa)
 	}
 }
 
+/* A writer wants or holds the lock.  Mutated only under scl_lock. */
+#define	SCL_COUNT_WRITER	0x80000000U
+#define	SCL_COUNT_REFS(c)	((c) & ~SCL_COUNT_WRITER)
+
+/*
+ * Drop one reader reference.  The result tells us both that it was the last
+ * one and that a writer is waiting for it.
+ */
+static void
+spa_config_exit_read(spa_config_lock_t *scl)
+{
+	uint32_t count;
+
+	ASSERT3U(SCL_COUNT_REFS(scl->scl_count), >, 0);
+
+	count = atomic_dec_32_nv(&scl->scl_count);
+	if (count != SCL_COUNT_WRITER)
+		return;
+	mutex_enter(&scl->scl_lock);
+	cv_broadcast(&scl->scl_cv);
+	mutex_exit(&scl->scl_lock);
+}
+
 int
 spa_config_tryenter(spa_t *spa, int locks, const void *tag, krw_t rw)
 {
@@ -485,27 +498,31 @@ spa_config_tryenter(spa_t *spa, int locks, const void *tag, krw_t rw)
 		spa_config_lock_t *scl = &spa->spa_config_lock[i];
 		if (!(locks & (1 << i)))
 			continue;
-		mutex_enter(&scl->scl_lock);
 		if (rw == RW_READER) {
-			if (scl->scl_writer || scl->scl_write_wanted) {
-				mutex_exit(&scl->scl_lock);
+			if (atomic_inc_32_nv(&scl->scl_count) &
+			    SCL_COUNT_WRITER) {
+				spa_config_exit_read(scl);
 				spa_config_exit(spa, locks & ((1 << i) - 1),
 				    tag);
 				return (0);
 			}
 		} else {
+			mutex_enter(&scl->scl_lock);
 			ASSERT(scl->scl_writer != curthread);
-			if (scl->scl_count != 0) {
+			/* Take the reference together with the bit or fail. */
+			if (atomic_cas_32(&scl->scl_count, 0,
+			    SCL_COUNT_WRITER | 1) != 0) {
 				mutex_exit(&scl->scl_lock);
 				spa_config_exit(spa, locks & ((1 << i) - 1),
 				    tag);
 				return (0);
 			}
+			scl->scl_write_wanted++;
 			scl->scl_writer = curthread;
+			mutex_exit(&scl->scl_lock);
 		}
-		scl->scl_count++;
-		mutex_exit(&scl->scl_lock);
 	}
+	membar_consumer();
 	return (1);
 }
 
@@ -524,6 +541,19 @@ spa_config_enter_impl(spa_t *spa, int locks, const void *tag, krw_t rw,
 			wlocks_held |= (1 << i);
 		if (!(locks & (1 << i)))
 			continue;
+
+		/*
+		 * Priority readers have to tell a waiting writer from a
+		 * holding one, which one word can not express, so they take
+		 * the lock.  They are rare.
+		 */
+		if (rw == RW_READER && !priority_flag) {
+			if ((atomic_inc_32_nv(&scl->scl_count) &
+			    SCL_COUNT_WRITER) == 0)
+				continue;
+			spa_config_exit_read(scl);
+		}
+
 		mutex_enter(&scl->scl_lock);
 		if (rw == RW_READER) {
 			while (scl->scl_writer ||
@@ -532,16 +562,18 @@ spa_config_enter_impl(spa_t *spa, int locks, const void *tag, krw_t rw,
 			}
 		} else {
 			ASSERT(scl->scl_writer != curthread);
-			while (scl->scl_count != 0) {
-				scl->scl_write_wanted++;
+			scl->scl_write_wanted++;
+			atomic_or_32(&scl->scl_count, SCL_COUNT_WRITER);
+			while (SCL_COUNT_REFS(scl->scl_count) != 0)
 				cv_wait(&scl->scl_cv, &scl->scl_lock);
-				scl->scl_write_wanted--;
-			}
 			scl->scl_writer = curthread;
 		}
-		scl->scl_count++;
+		atomic_inc_32(&scl->scl_count);
 		mutex_exit(&scl->scl_lock);
 	}
+
+	/* Pair with the membar_producer() in spa_config_exit(). */
+	membar_consumer();
 	ASSERT3U(wlocks_held, <=, locks);
 }
 
@@ -574,14 +606,25 @@ spa_config_exit(spa_t *spa, int locks, const void *tag)
 		spa_config_lock_t *scl = &spa->spa_config_lock[i];
 		if (!(locks & (1 << i)))
 			continue;
-		mutex_enter(&scl->scl_lock);
-		ASSERT(scl->scl_count > 0);
-		if (--scl->scl_count == 0) {
-			ASSERT(scl->scl_writer == NULL ||
-			    scl->scl_writer == curthread);
-			scl->scl_writer = NULL;	/* OK in either case */
-			cv_broadcast(&scl->scl_cv);
+		if (scl->scl_writer != curthread) {
+			spa_config_exit_read(scl);
+			continue;
 		}
+
+		/*
+		 * A reader mid-backoff may hold a reference, so the count is
+		 * not ours alone.  Clearing SCL_COUNT_WRITER opens the reader
+		 * fast path, so it goes last and after a barrier.
+		 */
+		mutex_enter(&scl->scl_lock);
+		ASSERT3U(SCL_COUNT_REFS(scl->scl_count), >, 0);
+		scl->scl_writer = NULL;
+		atomic_dec_32(&scl->scl_count);
+		if (--scl->scl_write_wanted == 0) {
+			membar_producer();
+			atomic_and_32(&scl->scl_count, ~SCL_COUNT_WRITER);
+		}
+		cv_broadcast(&scl->scl_cv);
 		mutex_exit(&scl->scl_lock);
 	}
 }
@@ -595,7 +638,7 @@ spa_config_held(spa_t *spa, int locks, krw_t rw)
 		spa_config_lock_t *scl = &spa->spa_config_lock[i];
 		if (!(locks & (1 << i)))
 			continue;
-		if ((rw == RW_READER && scl->scl_count != 0) ||
+		if ((rw == RW_READER && SCL_COUNT_REFS(scl->scl_count) != 0) ||
 		    (rw == RW_WRITER && scl->scl_writer == curthread))
 			locks_held |= 1 << i;
 	}
@@ -663,10 +706,11 @@ spa_namespace_broadcast(void)
 
 /*
  * Lookup the named spa_t in the AVL tree.  The spa_namespace_lock must be held.
- * Returns NULL if no matching spa_t is found.
+ * Returns NULL if no matching spa_t is found.  If busy is not NULL, set it
+ * instead of waiting for another thread to import or export the pool.
  */
-spa_t *
-spa_lookup(const char *name)
+static spa_t *
+spa_lookup_impl(const char *name, boolean_t *busy)
 {
 	static spa_t search;	/* spa_t is large; don't allocate on stack */
 	spa_t *spa;
@@ -698,11 +742,33 @@ retry:
 	    spa->spa_load_thread != curthread) ||
 	    (spa->spa_export_thread != NULL &&
 	    spa->spa_export_thread != curthread)) {
+		if (busy != NULL) {
+			*busy = B_TRUE;
+			return (spa);
+		}
 		spa_namespace_wait();
 		goto retry;
 	}
 
 	return (spa);
+}
+
+spa_t *
+spa_lookup(const char *name)
+{
+	return (spa_lookup_impl(name, NULL));
+}
+
+/*
+ * Return B_TRUE if spa_lookup() would wait for the named pool.
+ */
+boolean_t
+spa_lookup_would_wait(const char *name)
+{
+	boolean_t busy = B_FALSE;
+
+	(void) spa_lookup_impl(name, &busy);
+	return (busy);
 }
 
 /*
@@ -895,6 +961,7 @@ spa_remove(spa_t *spa)
 	ASSERT(spa_state(spa) == POOL_STATE_UNINITIALIZED);
 	ASSERT3U(zfs_refcount_count(&spa->spa_refcount), ==, 0);
 	ASSERT0(spa->spa_waiters);
+	ASSERT0(spa->spa_stats_holds);
 
 	nvlist_free(spa->spa_config_splitting);
 
@@ -1378,8 +1445,7 @@ spa_vdev_config_exit(spa_t *spa, vdev_t *vd, uint64_t txg, int error,
 	 * is useful for ensuring that configurations are updated
 	 * transactionally.
 	 */
-	if (zio_injection_enabled)
-		zio_handle_panic_injection(spa, tag, 0);
+	zio_handle_panic_injection(spa, tag, 0);
 
 	/*
 	 * Note: this txg_wait_synced() is important because it ensures
@@ -1503,8 +1569,16 @@ spa_vdev_state_exit(spa_t *spa, vdev_t *vd, int error)
 	 * are synchronous.  This is important for things like zpool offline:
 	 * when the command completes, you expect no further I/O from ZFS.
 	 */
-	if (vd != NULL)
-		txg_wait_synced(spa->spa_dsl_pool, 0);
+	if (vd != NULL) {
+		/*
+		 * A suspended pool cannot sync this txg. Report the
+		 * suspend instead of waiting for it.
+		 */
+		int werr = txg_wait_synced_flags(spa->spa_dsl_pool, 0,
+		    TXG_WAIT_SUSPEND);
+		if (werr != 0 && error == 0)
+			error = SET_ERROR(EAGAIN);
+	}
 
 	/*
 	 * If the config changed, update the config cache.
@@ -1899,6 +1973,18 @@ spa_open_txg(spa_t *spa)
 	return (spa->spa_dsl_pool->dp_tx.tx_open_txg);
 }
 
+uint64_t
+spa_load_max_txg(spa_t *spa)
+{
+	return (spa->spa_load_max_txg);
+}
+
+uint64_t
+spa_current_txg(spa_t *spa)
+{
+	return (spa->spa_uberblock.ub_txg);
+}
+
 /*
  * Return the last txg where data can be dirtied. The final txgs
  * will be used to just clear out any deferred frees that remain.
@@ -2110,6 +2196,23 @@ spa_dedup_class(spa_t *spa)
 	return (spa->spa_dedup_class);
 }
 
+/*
+ * Whether gang headers can be larger than SPA_OLD_GANGBLOCKSIZE.  While a
+ * pool is being loaded, the MOS is read before the feature refcounts are,
+ * so spa_feature_is_active() is still false; the label's features_for_read
+ * lists dynamic_gang_header (a ZFEATURE_FLAG_MOS feature) when it is active.
+ */
+boolean_t
+spa_dynamic_gang_header(spa_t *spa)
+{
+	if (spa_feature_is_active(spa, SPA_FEATURE_DYNAMIC_GANG_HEADER))
+		return (B_TRUE);
+	return (spa->spa_load_state != SPA_LOAD_NONE &&
+	    spa->spa_label_features != NULL &&
+	    nvlist_exists(spa->spa_label_features,
+	    spa_feature_table[SPA_FEATURE_DYNAMIC_GANG_HEADER].fi_guid));
+}
+
 boolean_t
 spa_special_has_ddt(spa_t *spa)
 {
@@ -2132,6 +2235,16 @@ spa_preferred_class(spa_t *spa, const zio_t *zio)
 		ASSERT(mc != NULL);
 		return (mc);
 	}
+
+	/*
+	 * Allocations fall back from the dedup class to the special class
+	 * to the normal class.  The normal class is the last resort: a
+	 * block there has either failed in the other classes already or
+	 * never belonged in them, so the caller must gang it rather than
+	 * fall back again, or it would bounce between the classes forever.
+	 */
+	if (mc == spa_normal_class(spa))
+		return (mc);
 
 	/*
 	 * Override object type for the purposes of selecting a storage class.
@@ -2334,10 +2447,50 @@ bp_get_dsize(spa_t *spa, const blkptr_t *bp)
 	return (dsize);
 }
 
+/*
+ * Return B_TRUE if every DVA of the block has the allocated size that its
+ * physical size would get on the same vdev in the given txg, so that writing
+ * it again would take the same space there.  A gang block's DVAs have the size
+ * of its header, and a block on an indirect vdev would move, so their size is
+ * not current.  Holes and embedded blocks allocate nothing.
+ */
+boolean_t
+bp_asize_is_current(spa_t *spa, const blkptr_t *bp, uint64_t txg)
+{
+	if (BP_IS_GANG(bp))
+		return (B_FALSE);
+	if (BP_GET_NDVAS(bp) == 0)
+		return (B_TRUE);
+
+	boolean_t same = B_TRUE;
+	uint64_t psize = BP_GET_PSIZE(bp);
+
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+
+	for (int d = 0; same && d < BP_GET_NDVAS(bp); d++) {
+		const dva_t *dva = &bp->blk_dva[d];
+		vdev_t *vd = vdev_lookup_top(spa, DVA_GET_VDEV(dva));
+
+		same = vd != NULL && vdev_is_concrete(vd) &&
+		    DVA_GET_ASIZE(dva) ==
+		    vdev_psize_to_asize_txg(vd, psize, txg);
+	}
+
+	spa_config_exit(spa, SCL_VDEV, FTAG);
+
+	return (same);
+}
+
 uint64_t
 spa_dirty_data(spa_t *spa)
 {
 	return (spa->spa_dsl_pool->dp_dirty_total);
+}
+
+uint64_t
+spa_load_txg(spa_t *spa)
+{
+	return (spa->spa_load_txg);
 }
 
 /*
@@ -2603,7 +2756,7 @@ spa_import_progress_remove(uint64_t pool_guid)
 			if (sip->pool_name)
 				spa_strfree(sip->pool_name);
 			if (sip->spa_load_notes)
-				spa_strfree(sip->spa_load_notes);
+				kmem_strfree(sip->spa_load_notes);
 			list_remove(&shl->procfs_list.pl_list, sip);
 			shl->size--;
 			kmem_free(sip, sizeof (spa_import_progress_t));
@@ -2767,6 +2920,27 @@ boolean_t
 spa_writeable(spa_t *spa)
 {
 	return (!!(spa->spa_mode & SPA_MODE_WRITE) && spa->spa_trust_config);
+}
+
+/*
+ * Whether a read that found a damaged copy may rewrite it with the good data
+ * in hand (self-healing, and resilver or rebuild repairs).
+ *
+ * Not while loading a txg other than the newest one (an explicitly requested
+ * txg, a rewind, or a dry run probing either) until the load commits to it by
+ * starting to sync: the blocks of an older txg may have been freed and their
+ * space reused by later txgs, so a copy failing its checksum is expected, and
+ * rewriting it would overwrite live blocks of those later txgs.  A dry run
+ * would damage the pool it promised not to modify, and a rewind that rejects
+ * this txg would damage the newer txgs, which are all that is left if no
+ * older txg loads either.
+ */
+boolean_t
+spa_self_heal_allowed(spa_t *spa)
+{
+	return (spa_writeable(spa) &&
+	    (spa->spa_load_state == SPA_LOAD_NONE ||
+	    spa->spa_load_max_txg == UINT64_MAX || spa->spa_sync_on));
 }
 
 /*
@@ -3056,11 +3230,24 @@ spa_has_checkpoint(spa_t *spa)
 	return (spa->spa_checkpoint_txg != 0);
 }
 
+uint64_t
+spa_checkpoint_txg(spa_t *spa)
+{
+	return (spa->spa_checkpoint_txg);
+}
+
 boolean_t
 spa_importing_readonly_checkpoint(spa_t *spa)
 {
 	return ((spa->spa_import_flags & ZFS_IMPORT_CHECKPOINT) &&
 	    spa->spa_mode == SPA_MODE_READ);
+}
+
+boolean_t
+spa_importing_checkpoint(spa_t *spa)
+{
+	return ((spa->spa_import_flags & ZFS_IMPORT_CHECKPOINT) &&
+	    spa->spa_uberblock.ub_checkpoint_txg != 0);
 }
 
 uint64_t
@@ -3166,6 +3353,7 @@ EXPORT_SYMBOL(spa_syncing_txg);
 EXPORT_SYMBOL(spa_version);
 EXPORT_SYMBOL(spa_state);
 EXPORT_SYMBOL(spa_load_state);
+EXPORT_SYMBOL(spa_load_txg);
 EXPORT_SYMBOL(spa_freeze_txg);
 EXPORT_SYMBOL(spa_get_min_alloc_range); /* for Lustre */
 EXPORT_SYMBOL(spa_get_dspace);
@@ -3208,8 +3396,10 @@ EXPORT_SYMBOL(spa_missing_tvds_allowed);
 EXPORT_SYMBOL(spa_set_missing_tvds);
 EXPORT_SYMBOL(spa_state_to_name);
 EXPORT_SYMBOL(spa_importing_readonly_checkpoint);
+EXPORT_SYMBOL(spa_importing_checkpoint);
 EXPORT_SYMBOL(spa_min_claim_txg);
 EXPORT_SYMBOL(spa_suspend_async_destroy);
+EXPORT_SYMBOL(spa_checkpoint_txg);
 EXPORT_SYMBOL(spa_has_checkpoint);
 EXPORT_SYMBOL(spa_top_vdevs_spacemap_addressable);
 

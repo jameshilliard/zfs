@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2004, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -72,24 +62,6 @@ typedef struct fmd_module {
  */
 fmd_module_t	zfs_retire_module;
 fmd_module_t	zfs_diagnosis_module;
-
-/*
- * Enable a reasonable set of defaults for libumem debugging on DEBUG builds.
- */
-
-#ifdef DEBUG
-const char *
-_umem_debug_init(void)
-{
-	return ("default,verbose"); /* $UMEM_DEBUG setting */
-}
-
-const char *
-_umem_logging_init(void)
-{
-	return ("fail,contents"); /* $UMEM_LOGGING setting */
-}
-#endif
 
 /*
  * Register a module with fmd and finish module initialization.
@@ -183,21 +155,21 @@ void *
 fmd_hdl_alloc(fmd_hdl_t *hdl, size_t size, int flags)
 {
 	(void) hdl;
-	return (umem_alloc(size, flags));
+	return (kmem_alloc(size, flags));
 }
 
 void *
 fmd_hdl_zalloc(fmd_hdl_t *hdl, size_t size, int flags)
 {
 	(void) hdl;
-	return (umem_zalloc(size, flags));
+	return (kmem_zalloc(size, flags));
 }
 
 void
 fmd_hdl_free(fmd_hdl_t *hdl, void *data, size_t size)
 {
 	(void) hdl;
-	umem_free(data, size);
+	kmem_free(data, size);
 }
 
 /*

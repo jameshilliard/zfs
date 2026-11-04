@@ -1,8 +1,6 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
-#
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
 # You may only use this file in accordance with the terms of version
@@ -10,9 +8,7 @@
 #
 # A full copy of the text of the CDDL should have accompanied this
 # source.  A copy of the CDDL is also available via the Internet at
-# http://www.illumos.org/license/CDDL.
-#
-# CDDL HEADER END
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -27,11 +23,11 @@
 #	l2arc_misses does not increment upon reads from a pool without l2arc
 #
 # STRATEGY:
-#	1. Create pool with a cache device.
-#	2. Create pool without a cache device.
-#	3. Create a random file in the no-cache-device pool,
+#	1. Create pool without a cache device.
+#	2. Create a random file in the no-cache-device pool,
 #		and random read for 10 sec.
-#	4. Check that l2arc_misses hasn't risen
+#	3. Check that l2arc_misses hasn't risen
+#	4. Create pool with a cache device.
 #	5. Create a random file in the pool with the cache device,
 #		and random read for 10 sec.
 #	6. Check that l2arc_misses has risen
@@ -60,7 +56,6 @@ export FILE_SIZE=$(( floor($fill_mb / $NUMJOBS) ))M
 
 log_must truncate -s ${cache_sz}M $VDEV_CACHE
 
-log_must zpool create -O compression=off -f $TESTPOOL $VDEV cache $VDEV_CACHE
 log_must zpool create -O compression=off -f $TESTPOOL1 $VDEV1
 
 # I/O to pool without l2arc - expect that l2_misses stays constant
@@ -76,6 +71,13 @@ typeset starting_miss_count=$(kstat arcstats.l2_misses)
 
 log_must fio $FIO_SCRIPTS/random_reads.fio
 log_must test $(kstat arcstats.l2_misses) -eq $starting_miss_count
+
+#
+# Create the pool with the cache device only now: l2_misses counts the
+# reads of every pool with a cache device, so any read from that pool in
+# the meantime would be counted.
+#
+log_must zpool create -O compression=off -f $TESTPOOL $VDEV cache $VDEV_CACHE
 
 # I/O to pool with l2arc - expect that l2_misses rises
 export DIRECTORY=/$TESTPOOL

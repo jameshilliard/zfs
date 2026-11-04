@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -408,6 +398,12 @@ zio_checksum_compute(zio_t *zio, enum zio_checksum checksum,
 		abd_copy_from_buf_off(abd, &cksum,
 		    eck_offset + offsetof(zio_eck_t, zec_cksum),
 		    sizeof (zio_cksum_t));
+	} else if (zio->io_bp == NULL) {
+		zio_eck_t *eck = (zio_eck_t *)(zio->io_private);
+		ci->ci_func[0](abd, size, spa->spa_cksum_tmpls[checksum],
+		    &cksum);
+		eck->zec_cksum = cksum;
+		memcpy(&eck->zec_magic, &zec_magic, sizeof (zec_magic));
 	} else {
 		saved = bp->blk_cksum;
 		ci->ci_func[0](abd, size, spa->spa_cksum_tmpls[checksum],
@@ -419,22 +415,20 @@ zio_checksum_compute(zio_t *zio, enum zio_checksum checksum,
 }
 
 int
-zio_checksum_error_impl(spa_t *spa, const blkptr_t *bp,
-    enum zio_checksum checksum, abd_t *abd, uint64_t size, uint64_t offset,
-    zio_bad_cksum_t *info)
+zio_checksum_error_impl(zio_t *zio, enum zio_checksum checksum, abd_t *abd,
+    uint64_t size, uint64_t offset, zio_bad_cksum_t *info)
 {
 	zio_checksum_info_t *ci = &zio_checksum_table[checksum];
 	zio_cksum_t actual_cksum, expected_cksum;
 	zio_eck_t eck;
+	spa_t *spa = zio->io_spa;
+	const blkptr_t *bp = zio->io_bp;
 	int byteswap;
 
 	if (checksum >= ZIO_CHECKSUM_FUNCTIONS || ci->ci_func[0] == NULL)
 		return (SET_ERROR(EINVAL));
 
 	zio_checksum_template_init(checksum, spa);
-
-	IMPLY(bp == NULL, ci->ci_flags & ZCHECKSUM_FLAG_EMBEDDED);
-	IMPLY(bp == NULL, checksum == ZIO_CHECKSUM_LABEL);
 
 	if (ci->ci_flags & ZCHECKSUM_FLAG_EMBEDDED) {
 		zio_cksum_t verifier;
@@ -498,6 +492,17 @@ zio_checksum_error_impl(spa_t *spa, const blkptr_t *bp,
 			byteswap_uint64_array(&expected_cksum,
 			    sizeof (zio_cksum_t));
 		}
+	} else if (zio->io_bp == NULL) {
+		eck = *(zio_eck_t *)(zio->io_private);
+		byteswap = (eck.zec_magic == BSWAP_64(ZEC_MAGIC));
+		expected_cksum = eck.zec_cksum;
+		ci->ci_func[byteswap](abd, size,
+		    spa->spa_cksum_tmpls[checksum], &actual_cksum);
+
+		if (byteswap) {
+			byteswap_uint64_array(&expected_cksum,
+			    sizeof (zio_cksum_t));
+		}
 	} else {
 		byteswap = BP_SHOULD_BYTESWAP(bp);
 		expected_cksum = bp->blk_cksum;
@@ -548,24 +553,23 @@ zio_checksum_error(zio_t *zio, zio_bad_cksum_t *info)
 	uint64_t size = bp ? BP_GET_PSIZE(bp) : zio->io_size;
 	uint64_t offset = zio->io_offset;
 	abd_t *data = zio->io_abd;
-	spa_t *spa = zio->io_spa;
 
 	if (bp && BP_IS_GANG(bp)) {
-		if (spa_feature_is_active(spa, SPA_FEATURE_DYNAMIC_GANG_HEADER))
+		if (spa_dynamic_gang_header(zio->io_spa))
 			size = zio->io_size;
 		else
 			size = SPA_OLD_GANGBLOCKSIZE;
 	}
 
-	error = zio_checksum_error_impl(spa, bp, checksum, data, size,
-	    offset, info);
+	error = zio_checksum_error_impl(zio, checksum, data, size, offset,
+	    info);
 	if (error && bp && BP_IS_GANG(bp) && size > SPA_OLD_GANGBLOCKSIZE) {
 		/*
 		 * It's possible that this is an old gang block. Rerun
 		 * the checksum with the old size; if that passes, then
 		 * update the gangblocksize appropriately.
 		 */
-		error = zio_checksum_error_impl(spa, bp, checksum, data,
+		error = zio_checksum_error_impl(zio, checksum, data,
 		    SPA_OLD_GANGBLOCKSIZE, offset, info);
 		if (error == 0) {
 			ASSERT3U(zio->io_child_type, ==, ZIO_CHILD_VDEV);

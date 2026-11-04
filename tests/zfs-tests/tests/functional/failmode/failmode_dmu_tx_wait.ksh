@@ -1,24 +1,14 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -47,6 +37,8 @@ DISK=${DISKS%% *}
 log_must zpool create -o failmode=wait -f $TESTPOOL $DISK
 log_must zfs create -o recordsize=128k $TESTPOOL/$TESTFS
 
+typeset -i suspended_before=$(kstat dmu_tx.dmu_tx_suspended)
+
 # start writing to a file in the background. these args to dd will make it
 # keep writing until it fills the pool, but we will kill it before that happens.
 dd if=/dev/urandom of=/$TESTPOOL/$TESTFS/file bs=128k &
@@ -59,17 +51,23 @@ sleep 2
 log_must zinject -d $DISK -e io -T write $TESTPOOL
 log_must zinject -d $DISK -e nxio -T probe $TESTPOOL
 
-# should only take a moment, but give it a chance
-log_note "waiting for pool to suspend"
-typeset -i tries=10
-until [[ $(kstat_pool $TESTPOOL state) == "SUSPENDED" ]] ; do
+# Wait for the failed I/O and for dd to observe the suspension. Neither
+# transition is immediate on a busy system.
+log_note "waiting for pool suspension and blocked writer"
+typeset -i tries=60
+until [[ $(kstat_pool $TESTPOOL state) == "SUSPENDED" ]] &&
+    (( $(kstat dmu_tx.dmu_tx_suspended) > suspended_before )); do
 	if ((tries-- == 0)); then
-		log_fail "pool didn't suspend"
+		log_note "pool state: $(kstat_pool $TESTPOOL state)"
+		log_note "dmu_tx_suspended: $(kstat dmu_tx.dmu_tx_suspended)," \
+		    "was $suspended_before"
+		log_fail "pool or writer didn't observe suspension"
 	fi
+	log_must kill -0 $dd_pid
 	sleep 1
 done
 
-# dmu_tx_try_assign() should have noticed the suspend by now
+# dmu_tx_try_assign() has observed this suspension.
 typeset -i suspended=$(kstat dmu_tx.dmu_tx_suspended)
 
 # dd should still be running, blocked in the kernel

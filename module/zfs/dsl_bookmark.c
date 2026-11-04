@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
- *
  * This file and its contents are supplied under the terms of the
  * Common Development and Distribution License ("CDDL"), version 1.0.
  * You may only use this file in accordance with the terms of version
@@ -9,9 +7,7 @@
  *
  * A full copy of the text of the CDDL should have accompanied this
  * source.  A copy of the CDDL is also available via the Internet at
- * http://www.illumos.org/license/CDDL.
- *
- * CDDL HEADER END
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -493,7 +489,7 @@ dsl_bookmark_create_sync_impl_snap(const char *bookmark, const char *snapshot,
 			    DB_RF_MUST_SUCCEED, tag, &db));
 			dmu_buf_will_fill(db, tx, B_FALSE);
 			VERIFY0(dbuf_spill_set_blksz(db, P2ROUNDUP(bonuslen,
-			    SPA_MINBLOCKSIZE), tx));
+			    SPA_MINBLOCKSIZE), B_TRUE, tx));
 			local_rl->rl_phys = db->db_data;
 			local_rl->rl_dbuf = db;
 		}
@@ -973,12 +969,6 @@ out:
 	return (err);
 }
 
-typedef struct dsl_bookmark_destroy_arg {
-	nvlist_t *dbda_bmarks;
-	nvlist_t *dbda_success;
-	nvlist_t *dbda_errors;
-} dsl_bookmark_destroy_arg_t;
-
 static void
 dsl_bookmark_destroy_sync_impl(dsl_dataset_t *ds, const char *name,
     dmu_tx_t *tx)
@@ -1086,7 +1076,7 @@ dsl_bookmark_destroy_sync_impl(dsl_dataset_t *ds, const char *name,
 	VERIFY0(zap_remove_norm(mos, bmark_zapobj, name, mt, tx));
 }
 
-static int
+int
 dsl_bookmark_destroy_check(void *arg, dmu_tx_t *tx)
 {
 	dsl_bookmark_destroy_arg_t *dbda = arg;
@@ -1151,7 +1141,7 @@ dsl_bookmark_destroy_check(void *arg, dmu_tx_t *tx)
 	return (rv);
 }
 
-static void
+void
 dsl_bookmark_destroy_sync(void *arg, dmu_tx_t *tx)
 {
 	dsl_bookmark_destroy_arg_t *dbda = arg;

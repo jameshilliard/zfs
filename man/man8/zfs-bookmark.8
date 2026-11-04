@@ -1,23 +1,13 @@
 .\" SPDX-License-Identifier: CDDL-1.0
 .\"
-.\" CDDL HEADER START
+.\" This file and its contents are supplied under the terms of the
+.\" Common Development and Distribution License ("CDDL"), version 1.0.
+.\" You may only use this file in accordance with the terms of version
+.\" 1.0 of the CDDL.
 .\"
-.\" The contents of this file are subject to the terms of the
-.\" Common Development and Distribution License (the "License").
-.\" You may not use this file except in compliance with the License.
-.\"
-.\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or https://opensource.org/licenses/CDDL-1.0.
-.\" See the License for the specific language governing permissions
-.\" and limitations under the License.
-.\"
-.\" When distributing Covered Code, include this CDDL HEADER in each
-.\" file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-.\" If applicable, add the following below this CDDL HEADER, with the
-.\" fields enclosed by brackets "[]" replaced with your own identifying
-.\" information: Portions Copyright [yyyy] [name of copyright owner]
-.\"
-.\" CDDL HEADER END
+.\" A full copy of the text of the CDDL should have accompanied this
+.\" source.  A copy of the CDDL is also available via the Internet at
+.\" https://opensource.org/license/CDDL-1.0.
 .\"
 .\" Copyright (c) 2009 Sun Microsystems, Inc. All Rights Reserved.
 .\" Copyright 2011 Joshua M. Clulow <josh@sysmgr.org>
@@ -31,7 +21,7 @@
 .\" Copyright 2019 Joyent, Inc.
 .\" Copyright (c) 2019, 2020 by Christian Schwarz. All Rights Reserved.
 .\"
-.Dd July 11, 2022
+.Dd October 1, 2026
 .Dt ZFS-BOOKMARK 8
 .Os
 .
@@ -57,7 +47,20 @@ datasets.
 The source must be a snapshot, and a bookmark is created only for the
 descendants that have a snapshot of that name; descendants without it are
 skipped.
+The dataset of
+.Ar newbookmark ,
+if given, must be the same as that of the source snapshot.
 .El
+.Pp
+Either the source or
+.Ar newbookmark
+may be given in short form
+.Po
+.Sy @ Ns Ar snapshot
+or
+.Sy # Ns Ar bookmark
+.Pc ,
+in which case its dataset is taken from the other argument.
 .Pp
 When creating a bookmark from an existing redaction bookmark, the resulting
 bookmark is

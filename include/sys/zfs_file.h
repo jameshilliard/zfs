@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 #ifndef	_SYS_ZFS_FILE_H
@@ -36,23 +26,15 @@
 typedef off_t loff_t;
 #endif
 
-#ifndef _KERNEL
-typedef struct zfs_file {
-	int f_fd;
-	int f_dump_fd;
-} zfs_file_t;
-#elif defined(__linux__) || defined(__FreeBSD__)
-typedef struct file zfs_file_t;
-#else
-#error "unknown OS"
-#endif
+typedef void zfs_file_t;
 
 typedef struct zfs_file_attr {
 	uint64_t	zfa_size;	/* file size */
 	mode_t		zfa_mode;	/* file type */
 } zfs_file_attr_t;
 
-int zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fp);
+int zfs_file_open(const char *path, int flags, int mode, cred_t *cr,
+    zfs_file_t **fp);
 void zfs_file_close(zfs_file_t *fp);
 
 int zfs_file_write(zfs_file_t *fp, const void *buf, size_t len, ssize_t *resid);

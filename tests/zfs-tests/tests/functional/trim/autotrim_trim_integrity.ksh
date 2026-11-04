@@ -1,8 +1,6 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
-#
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
 # You may only use this file in accordance with the terms of version
@@ -10,9 +8,7 @@
 #
 # A full copy of the text of the CDDL should have accompanied this
 # source.  A copy of the CDDL is also available via the Internet at
-# http://www.illumos.org/license/CDDL.
-#
-# CDDL HEADER END
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -35,7 +31,7 @@
 #	4. While generating data issue manual trims.
 #	4. Verify trim IOs of the expected type were issued for the pool.
 #	5. Verify data integrity of the pool after trim.
-#	6. Repeat test for striped, mirrored, and RAIDZ pools.
+#	6. Repeat test for striped, mirrored, AnyRAID, and RAIDZ pools.
 
 verify_runnable "global"
 
@@ -62,7 +58,7 @@ log_must set_tunable64 TRIM_EXTENT_BYTES_MIN 512
 typeset trim_txg_batch=$(get_tunable TRIM_TXG_BATCH)
 log_must set_tunable64 TRIM_TXG_BATCH 8
 
-for type in "" "mirror" "raidz" "raidz2" "draid" "draid2"; do
+for type in "" "mirror" "anymirror0" "anymirror1" "anymirror2" "anymirror3" "raidz" "raidz2" "draid" "draid2"; do
 	log_must truncate -s 1G $TRIM_VDEVS
 
 	log_must zpool create -f $TESTPOOL $type $TRIM_VDEVS

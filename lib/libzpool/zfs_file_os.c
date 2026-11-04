@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -28,8 +18,11 @@
 
 #include <sys/zfs_context.h>
 #include <sys/zfs_file.h>
-#include <libzpool.h>
-#include <libzutil.h>
+
+typedef struct {
+	int f_fd;
+	int f_dump_fd;
+} file_t;
 
 /* If set, all blocks read will be copied to the specified directory. */
 char *vn_dumpdir = NULL;
@@ -44,13 +37,15 @@ char *vn_dumpdir = NULL;
  * Returns 0 on success underlying error on failure.
  */
 int
-zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
+zfs_file_open(const char *path, int flags, int mode, cred_t *cr,
+    zfs_file_t **zfpp)
 {
+	(void) cr;
 	int fd;
 	int dump_fd;
 	int err;
 	int old_umask = 0;
-	zfs_file_t *fp;
+	file_t *fp;
 	struct stat64 st;
 
 	if (!(flags & O_CREAT) && stat64(path, &st) == -1)
@@ -63,20 +58,23 @@ zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 		old_umask = umask(0);
 
 	fd = open64(path, flags, mode);
-	if (fd == -1)
-		return (errno);
+	err = errno;
 
 	if (flags & O_CREAT)
 		(void) umask(old_umask);
 
+	if (fd == -1)
+		return (err);
+
 	if (vn_dumpdir != NULL) {
-		char *dumppath = umem_zalloc(MAXPATHLEN, UMEM_NOFAIL);
-		const char *inpath = zfs_basename(path);
+		char *dumppath = kmem_zalloc(MAXPATHLEN, KM_SLEEP);
+		const char *bn = strrchr(path, '/');
+		const char *inpath = (bn ? bn + 1 : path);
 
 		(void) snprintf(dumppath, MAXPATHLEN,
 		    "%s/%s", vn_dumpdir, inpath);
 		dump_fd = open64(dumppath, O_CREAT | O_WRONLY, 0666);
-		umem_free(dumppath, MAXPATHLEN);
+		kmem_free(dumppath, MAXPATHLEN);
 		if (dump_fd == -1) {
 			err = errno;
 			close(fd);
@@ -88,22 +86,23 @@ zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 
 	(void) fcntl(fd, F_SETFD, FD_CLOEXEC);
 
-	fp = umem_zalloc(sizeof (zfs_file_t), UMEM_NOFAIL);
+	fp = kmem_zalloc(sizeof (file_t), KM_SLEEP);
 	fp->f_fd = fd;
 	fp->f_dump_fd = dump_fd;
-	*fpp = fp;
+	*zfpp = fp;
 
 	return (0);
 }
 
 void
-zfs_file_close(zfs_file_t *fp)
+zfs_file_close(zfs_file_t *zfp)
 {
+	file_t *fp = zfp;
 	close(fp->f_fd);
 	if (fp->f_dump_fd != -1)
 		close(fp->f_dump_fd);
 
-	umem_free(fp, sizeof (zfs_file_t));
+	kmem_free(fp, sizeof (file_t));
 }
 
 /*
@@ -118,8 +117,9 @@ zfs_file_close(zfs_file_t *fp)
  * Returns 0 on success errno on failure.
  */
 int
-zfs_file_write(zfs_file_t *fp, const void *buf, size_t count, ssize_t *resid)
+zfs_file_write(zfs_file_t *zfp, const void *buf, size_t count, ssize_t *resid)
 {
+	file_t *fp = zfp;
 	ssize_t rc;
 
 	rc = write(fp->f_fd, buf, count);
@@ -147,9 +147,10 @@ zfs_file_write(zfs_file_t *fp, const void *buf, size_t count, ssize_t *resid)
  * Returns 0 on success errno on failure.
  */
 int
-zfs_file_pwrite(zfs_file_t *fp, const void *buf,
+zfs_file_pwrite(zfs_file_t *zfp, const void *buf,
     size_t count, loff_t pos, uint8_t ashift, ssize_t *resid)
 {
+	file_t *fp = zfp;
 	ssize_t rc, split, done;
 	int sectors;
 
@@ -203,8 +204,9 @@ zfs_file_pwrite(zfs_file_t *fp, const void *buf,
  * Returns 0 on success errno on failure.
  */
 int
-zfs_file_read(zfs_file_t *fp, void *buf, size_t count, ssize_t *resid)
+zfs_file_read(zfs_file_t *zfp, void *buf, size_t count, ssize_t *resid)
 {
+	file_t *fp = zfp;
 	int rc;
 
 	rc = read(fp->f_fd, buf, count);
@@ -232,9 +234,10 @@ zfs_file_read(zfs_file_t *fp, void *buf, size_t count, ssize_t *resid)
  * Returns 0 on success errno on failure.
  */
 int
-zfs_file_pread(zfs_file_t *fp, void *buf, size_t count, loff_t off,
+zfs_file_pread(zfs_file_t *zfp, void *buf, size_t count, loff_t off,
     ssize_t *resid)
 {
+	file_t *fp = zfp;
 	ssize_t rc;
 
 	rc = pread64(fp->f_fd, buf, count, off);
@@ -277,8 +280,9 @@ zfs_file_pread(zfs_file_t *fp, void *buf, size_t count, loff_t off,
  * Returns 0 on success errno on failure (ESPIPE for non seekable types)
  */
 int
-zfs_file_seek(zfs_file_t *fp, loff_t *offp, int whence)
+zfs_file_seek(zfs_file_t *zfp, loff_t *offp, int whence)
 {
+	file_t *fp = zfp;
 	loff_t rc;
 
 	rc = lseek(fp->f_fd, *offp, whence);
@@ -301,8 +305,9 @@ zfs_file_seek(zfs_file_t *fp, loff_t *offp, int whence)
  * Returns 0 on success or error code of underlying getattr call on failure.
  */
 int
-zfs_file_getattr(zfs_file_t *fp, zfs_file_attr_t *zfattr)
+zfs_file_getattr(zfs_file_t *zfp, zfs_file_attr_t *zfattr)
 {
+	file_t *fp = zfp;
 	struct stat64 st;
 
 	if (fstat64_blk(fp->f_fd, &st) == -1)
@@ -323,8 +328,9 @@ zfs_file_getattr(zfs_file_t *fp, zfs_file_attr_t *zfattr)
  * Returns 0 on success or error code of underlying sync call on failure.
  */
 int
-zfs_file_fsync(zfs_file_t *fp, int flags)
+zfs_file_fsync(zfs_file_t *zfp, int flags)
 {
+	file_t *fp = zfp;
 	(void) flags;
 
 	if (fsync(fp->f_fd) < 0)
@@ -341,18 +347,23 @@ zfs_file_fsync(zfs_file_t *fp, int flags)
  * len - length to zero or deallocate
  */
 int
-zfs_file_deallocate(zfs_file_t *fp, loff_t offset, loff_t len)
+zfs_file_deallocate(zfs_file_t *zfp, loff_t offset, loff_t len)
 {
+	file_t *fp = zfp;
 	int rc;
 #if defined(__linux__)
 	rc = fallocate(fp->f_fd,
 	    FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, len);
+	if (rc == -1)
+		rc = errno;
 #elif defined(__FreeBSD__) && (__FreeBSD_version >= 1400029)
 	struct spacectl_range rqsr = {
 		.r_offset = offset,
 		.r_len = len,
 	};
 	rc = fspacectl(fp->f_fd, SPACECTL_DEALLOC, &rqsr, 0, &rqsr);
+	if (rc == -1)
+		rc = errno;
 #else
 	(void) fp, (void) offset, (void) len;
 	rc = EOPNOTSUPP;
@@ -370,9 +381,10 @@ zfs_file_deallocate(zfs_file_t *fp, loff_t offset, loff_t len)
  * Returns current file offset.
  */
 loff_t
-zfs_file_off(zfs_file_t *fp)
+zfs_file_off(zfs_file_t *zfp)
 {
-	return (lseek(fp->f_fd, SEEK_CUR, 0));
+	file_t *fp = zfp;
+	return (lseek(fp->f_fd, 0, SEEK_CUR));
 }
 
 /*
@@ -380,14 +392,17 @@ zfs_file_off(zfs_file_t *fp)
  *
  * path - fully qualified file path
  *
- * Returns 0 on success.
+ * Returns 0 on success errno on failure.
  *
  * OPTIONAL
  */
 int
 zfs_file_unlink(const char *path)
 {
-	return (remove(path));
+	if (remove(path) == -1)
+		return (errno);
+
+	return (0);
 }
 
 /*
@@ -396,25 +411,28 @@ zfs_file_unlink(const char *path)
  * fd - input file descriptor
  *
  * Returns pointer to file struct or NULL.
- * Unsupported in user space.
  */
 zfs_file_t *
 zfs_file_get(int fd)
 {
-	(void) fd;
-	abort();
-	return (NULL);
+	/*
+	 * Note that we deliberately don't try to validate the fd. The point is
+	 * to return a zfs_file_t that represents that fd, whatever it is. If
+	 * its not valid for some operation, then that operation will fail when
+	 * attempted.
+	 */
+	file_t *fp = kmem_zalloc(sizeof (file_t), KM_SLEEP);
+	fp->f_fd = fd;
+	fp->f_dump_fd = -1;
+	return (fp);
 }
 /*
  * Drop reference to file pointer
  *
  * fp - pointer to file struct
- *
- * Unsupported in user space.
  */
 void
 zfs_file_put(zfs_file_t *fp)
 {
-	abort();
-	(void) fp;
+	kmem_free(fp, sizeof (file_t));
 }

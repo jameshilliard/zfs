@@ -1,27 +1,18 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2012, 2018 by Delphix. All rights reserved.
+ * Copyright 2026 Oxide Computer Company
  */
 
 #include <sys/zfs_context.h>
@@ -120,6 +111,10 @@ traverse_zil_record(zilog_t *zilog, const lr_t *lrc, void *arg,
 			return (0);
 
 		if (claim_txg == 0 || get_birth_time(td, bp) < claim_txg)
+			return (0);
+
+		/* Several records can share a dmu_sync() block. */
+		if (zil_bp_tree_add(zilog, bp) != 0)
 			return (0);
 
 		ASSERT3U(BP_GET_LSIZE(bp), !=, 0);
@@ -765,7 +760,7 @@ int
 traverse_pool(spa_t *spa, uint64_t txg_start, int flags,
     blkptr_cb_t func, void *arg)
 {
-	int err;
+	int err, hard_err = 0;
 	dsl_pool_t *dp = spa_get_dsl(spa);
 	objset_t *mos = dp->dp_meta_objset;
 	boolean_t hard = (flags & TRAVERSE_HARD);
@@ -783,8 +778,10 @@ traverse_pool(spa_t *spa, uint64_t txg_start, int flags,
 
 		err = dmu_object_info(mos, obj, &doi);
 		if (err != 0) {
-			if (hard)
+			if (hard) {
+				hard_err = err;
 				continue;
+			}
 			break;
 		}
 
@@ -796,8 +793,10 @@ traverse_pool(spa_t *spa, uint64_t txg_start, int flags,
 			err = dsl_dataset_hold_obj(dp, obj, FTAG, &ds);
 			dsl_pool_config_exit(dp, FTAG);
 			if (err != 0) {
-				if (hard)
+				if (hard) {
+					hard_err = err;
 					continue;
+				}
 				break;
 			}
 			if (dsl_dataset_phys(ds)->ds_prev_snap_txg > txg)
@@ -810,7 +809,13 @@ traverse_pool(spa_t *spa, uint64_t txg_start, int flags,
 	}
 	if (err == ESRCH)
 		err = 0;
-	return (err);
+
+	/*
+	 * Datasets we could not even open above were skipped, and unlike the
+	 * unreadable blocks they are not reported to the callback in any way.
+	 * Report the last such error now, once the traversal is complete.
+	 */
+	return (err != 0 ? err : hard_err);
 }
 
 EXPORT_SYMBOL(traverse_dataset);

@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -85,6 +75,7 @@ typedef enum dbuf_cached_state {
 
 struct dnode;
 struct dmu_tx;
+struct dmu_sync_arg;
 
 /*
  * level = 0 means the user data
@@ -159,6 +150,11 @@ typedef struct dbuf_dirty_record {
 			 */
 			arc_buf_t *dr_data;
 			override_states_t dr_override_state;
+			/*
+			 * The dmu_sync() or Direct I/O write in progress, if
+			 * dr_override_state is DR_IN_DMU_SYNC.
+			 */
+			struct dmu_sync_arg *dr_sync_arg;
 			uint8_t dr_copies;
 			uint8_t dr_gang_copies;
 			boolean_t dr_nopwrite;
@@ -347,7 +343,8 @@ uint64_t dbuf_whichblock(const struct dnode *di, const int64_t level,
     const uint64_t offset);
 
 void dbuf_create_bonus(struct dnode *dn);
-int dbuf_spill_set_blksz(dmu_buf_t *db, uint64_t blksz, dmu_tx_t *tx);
+int dbuf_spill_set_blksz(dmu_buf_t *db, uint64_t blksz, boolean_t copy,
+    dmu_tx_t *tx);
 
 void dbuf_rm_spill(struct dnode *dn, dmu_tx_t *tx);
 
@@ -414,7 +411,7 @@ void dbuf_free_range(struct dnode *dn, uint64_t start, uint64_t end,
 void dbuf_evict_range(struct dnode *dn, uint64_t start_blkid,
     uint64_t end_blkid);
 
-void dbuf_new_size(dmu_buf_impl_t *db, int size, dmu_tx_t *tx);
+void dbuf_new_size(dmu_buf_impl_t *db, int size, boolean_t copy, dmu_tx_t *tx);
 
 void dbuf_stats_init(dbuf_hash_table_t *hash);
 void dbuf_stats_destroy(void);
@@ -447,6 +444,8 @@ dbuf_find_dirty_lte(dmu_buf_impl_t *db, uint64_t txg)
 {
 	dbuf_dirty_record_t *dr;
 
+	/* Open context can add and remove records: walk under db_mtx. */
+	ASSERT(MUTEX_HELD(&db->db_mtx));
 	for (dr = list_head(&db->db_dirty_records);
 	    dr != NULL && dr->dr_txg > txg;
 	    dr = list_next(&db->db_dirty_records, dr))

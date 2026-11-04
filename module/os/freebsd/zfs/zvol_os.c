@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -78,6 +68,7 @@
 #include <sys/dirent.h>
 #include <sys/policy.h>
 #include <sys/queue.h>
+#include <sys/tsd.h>
 #include <sys/fs/zfs.h>
 #include <sys/zfs_ioctl.h>
 #include <sys/zil.h>
@@ -512,6 +503,16 @@ zvol_geom_bio_getattr(struct bio *bp)
 
 	if (g_handleattr_int(bp, "GEOM::candelete", 1))
 		return (0);
+
+	if (strcmp(bp->bio_attribute, "GEOM::physpath") == 0) {
+		mutex_enter(&zv->zv_state_lock);
+		if (g_handleattr_str(bp, "GEOM::physpath", zv->zv_name)) {
+			mutex_exit(&zv->zv_state_lock);
+			return (0);
+		}
+		mutex_exit(&zv->zv_state_lock);
+	}
+
 	if (strcmp(bp->bio_attribute, "blocksavail") == 0) {
 		dmu_objset_space(zv->zv_objset, &refd, &avail,
 		    &usedobjs, &availobjs);
@@ -1326,8 +1327,8 @@ zvol_os_rename_minor(zvol_state_t *zv, const char *newname)
  * request queue and generic disk structures for the block device.
  */
 static int
-zvol_alloc(const char *name, uint64_t volsize, uint64_t volblocksize,
-    zvol_state_t **zvp)
+zvol_alloc(const char *name, uint64_t dsobj, uint64_t volsize,
+    uint64_t volblocksize, zvol_state_t **zvp)
 {
 	zvol_state_t *zv;
 	uint64_t volmode;
@@ -1392,6 +1393,7 @@ zvol_alloc(const char *name, uint64_t volsize, uint64_t volblocksize,
 		knlist_init_sx(&zsd->zsd_selinfo.si_note, &zv->zv_state_lock);
 	}
 	(void) strlcpy(zv->zv_name, name, MAXPATHLEN);
+	zv->zv_dsobj = dsobj;
 	rw_init(&zv->zv_suspend_lock, NULL, RW_DEFAULT, NULL);
 	zfs_rangelock_init(&zv->zv_rangelock, NULL, NULL);
 
@@ -1513,7 +1515,8 @@ zvol_os_create_minor(const char *name)
 	if (error)
 		goto out_dmu_objset_disown;
 
-	error = zvol_alloc(name, volsize, doi->doi_data_block_size, &zv);
+	error = zvol_alloc(name, dmu_objset_id(os), volsize,
+	    doi->doi_data_block_size, &zv);
 	if (error || zv == NULL)
 		goto out_dmu_objset_disown;
 

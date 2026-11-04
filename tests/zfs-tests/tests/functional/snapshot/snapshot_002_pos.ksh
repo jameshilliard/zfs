@@ -1,24 +1,14 @@
 #! /bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -85,6 +75,7 @@ CWD=$PWD
 log_must cd $TESTDIR
 log_must tar cf $SNAPSHOT_TARDIR/original.tar .
 log_must cd $CWD
+log_must touch -r $TESTDIR $SNAPSHOT_TARDIR/original.times
 
 log_note "Create a snapshot and mount it..."
 log_must zfs snapshot $SNAPFS
@@ -108,6 +99,15 @@ log_must cd $TESTDIR/snapshot
 log_must tar xf $SNAPSHOT_TARDIR/snapshot.tar
 
 log_must cd $CWD
+
+#
+# bsdtar does not restore the times of "." when extracting, so the
+# two directories would keep the times of their extraction, which
+# differ whenever the extractions straddle a second.  Give them the
+# times of the directories that were archived, as GNU tar does.
+#
+log_must touch -r $SNAPSHOT_TARDIR/original.times $TESTDIR/original
+log_must touch -r $SNAPDIR $TESTDIR/snapshot
 
 log_must directory_diff $TESTDIR/original $TESTDIR/snapshot
 log_pass "Directory structures match."

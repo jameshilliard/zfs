@@ -1,8 +1,6 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
-#
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
 # You may only use this file in accordance with the terms of version
@@ -10,9 +8,7 @@
 #
 # A full copy of the text of the CDDL should have accompanied this
 # source.  A copy of the CDDL is also available via the Internet at
-# http://www.illumos.org/license/CDDL.
-#
-# CDDL HEADER END
+# https://opensource.org/license/CDDL-1.0.
 #
 # Copyright (c) 2020 Lawrence Livermore National Security, LLC.
 
@@ -29,6 +25,7 @@
 
 function cleanup
 {
+	poolexists $TESTPOOL || zpool import $TESTPOOL
 	datasetexists $TESTPOOL && destroy_pool $TESTPOOL
 }
 
@@ -146,26 +143,30 @@ actual=$(get_object_list $TESTPOOL/$TESTFS $objects | awk '{printf("%s ", $1)}' 
 log_must test "${actual% }" == "$expected"
 
 # Get all objects in the meta-objset to test m (spacemap) and z (zap) flags
-all_mos_objects=$(get_object_list $TESTPOOL 0:-1)
+log_must zpool export $TESTPOOL
+all_mos_objects=$(get_object_list -e $TESTPOOL 0:-1)
+[[ -n "$all_mos_objects" ]] || log_fail "zdb -e listed no objects"
 
 # Range 0:-1:m must output all space map objects
 expected=$(grep "SPA space map" <<< $all_mos_objects)
-actual=$(get_object_list $TESTPOOL 0:-1:m)
+actual=$(get_object_list -e $TESTPOOL 0:-1:m)
 log_must test "\n$actual\n" == "\n$expected\n"
 
 # Range 0:-1:z must output all zap objects
 expected=$(grep "zap" <<< $all_mos_objects)
-actual=$(get_object_list $TESTPOOL 0:-1:z)
+actual=$(get_object_list -e $TESTPOOL 0:-1:z)
 log_must test "\n$actual\n" == "\n$expected\n"
 
 # Range 0:-1:A-m-z must output all non-space maps and non-zaps
 expected=$(grep -v -e "zap" -e "SPA space map" <<< $all_mos_objects)
-actual=$(get_object_list $TESTPOOL 0:-1:A-m-z)
+actual=$(get_object_list -e $TESTPOOL 0:-1:A-m-z)
 log_must test "\n$actual\n" == "\n$expected\n"
 
 # Range 0:-1:mz must output all space maps and zaps
 expected=$(grep -e "SPA space map" -e "zap" <<< $all_mos_objects)
-actual=$(get_object_list $TESTPOOL 0:-1:mz)
+actual=$(get_object_list -e $TESTPOOL 0:-1:mz)
 log_must test "\n$actual\n" == "\n$expected\n"
+
+log_must zpool import $TESTPOOL
 
 log_pass "zdb -dd object range arguments work correctly"

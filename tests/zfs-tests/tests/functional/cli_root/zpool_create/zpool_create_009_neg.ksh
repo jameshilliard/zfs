@@ -1,24 +1,14 @@
 #!/bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -39,10 +29,12 @@
 #	devices, 'zpool create' should failed.
 #
 # STRATEGY:
-#	1. Loop to create the following three kinds of pools.
+#	1. Loop to create the following kinds of pools:
 #		- Regular pool
 #		- Mirror
 #		- Raidz
+#		- AnyRAID
+#		- dRAID
 #	2. Create two pools but using the same disks, expect failed.
 #	3. Create one pool but using the same disks twice, expect failed.
 #
@@ -62,13 +54,15 @@ log_assert "Create a pool with same devices twice or create two pools with " \
 	"same devices, 'zpool create' should fail."
 log_onexit cleanup
 
+create_sparse_files "file" 4 $MINVDEVSIZE2
+
 unset NOINUSE_CHECK
 typeset opt
-for opt in "" "mirror" "raidz" "draid"; do
+for opt in "" "mirror" "raidz" "anymirror" "draid"; do
 	if [[ $opt == "" ]]; then
-		typeset disks=$DISK0
+		typeset disks=$file0
 	else
-		typeset disks=$DISKS
+		typeset disks=$files
 	fi
 
 	# Create two pools but using the same disks.
@@ -78,7 +72,7 @@ for opt in "" "mirror" "raidz" "draid"; do
 
 	# Create two pools and part of the devices were overlapped
 	create_pool $TESTPOOL $opt $disks
-	log_mustnot zpool create -f $TESTPOOL1 $opt $DISK0
+	log_mustnot zpool create -f $TESTPOOL1 $opt $file0
 	destroy_pool $TESTPOOL
 
 	# Create one pool but using the same disks twice.

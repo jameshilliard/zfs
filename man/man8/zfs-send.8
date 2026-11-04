@@ -1,23 +1,13 @@
 .\" SPDX-License-Identifier: CDDL-1.0
 .\"
-.\" CDDL HEADER START
+.\" This file and its contents are supplied under the terms of the
+.\" Common Development and Distribution License ("CDDL"), version 1.0.
+.\" You may only use this file in accordance with the terms of version
+.\" 1.0 of the CDDL.
 .\"
-.\" The contents of this file are subject to the terms of the
-.\" Common Development and Distribution License (the "License").
-.\" You may not use this file except in compliance with the License.
-.\"
-.\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-.\" or https://opensource.org/licenses/CDDL-1.0.
-.\" See the License for the specific language governing permissions
-.\" and limitations under the License.
-.\"
-.\" When distributing Covered Code, include this CDDL HEADER in each
-.\" file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-.\" If applicable, add the following below this CDDL HEADER, with the
-.\" fields enclosed by brackets "[]" replaced with your own identifying
-.\" information: Portions Copyright [yyyy] [name of copyright owner]
-.\"
-.\" CDDL HEADER END
+.\" A full copy of the text of the CDDL should have accompanied this
+.\" source.  A copy of the CDDL is also available via the Internet at
+.\" https://opensource.org/license/CDDL-1.0.
 .\"
 .\" Copyright (c) 2009 Sun Microsystems, Inc. All Rights Reserved.
 .\" Copyright 2011 Joshua M. Clulow <josh@sysmgr.org>
@@ -107,15 +97,32 @@ option.
 Generate a stream which may contain blocks larger than 128 KiB.
 This flag has no effect if the
 .Sy large_blocks
-pool feature is disabled, or if the
+pool feature is disabled, or if this filesystem has never contained a
+block larger than 128 KiB.
+Note that it is writing such a block, not setting the
 .Sy recordsize
-property of this filesystem has never been set above 128 KiB.
+property, that activates the per-dataset
+.Sy large_blocks
+feature and lets this flag take effect.
 The receiving system must have the
 .Sy large_blocks
 pool feature enabled as well.
 This flag is required if the
 .Sy large_microzap
 pool feature is active.
+.Pp
+Replicating a filesystem that contains large blocks without this flag
+splits them into 128 KiB blocks on the receiving side, so the received
+copy does not activate the
+.Sy large_blocks
+feature.
+The two copies then have different physical block layouts, and an
+incremental stream sent back in the opposite direction is rejected,
+because that stream cannot carry the large blocks the original
+filesystem still has.
+Recovering from this requires a full receive into a new dataset.
+Use this flag from the first replication onwards if the direction of
+replication may ever be reversed.
 See
 .Xr zpool-features 7
 for details on ZFS feature flags and the
@@ -348,12 +355,29 @@ non-deduplicated stream will be generated.
 Generate a stream which may contain blocks larger than 128 KiB.
 This flag has no effect if the
 .Sy large_blocks
-pool feature is disabled, or if the
+pool feature is disabled, or if this filesystem has never contained a
+block larger than 128 KiB.
+Note that it is writing such a block, not setting the
 .Sy recordsize
-property of this filesystem has never been set above 128 KiB.
+property, that activates the per-dataset
+.Sy large_blocks
+feature and lets this flag take effect.
 The receiving system must have the
 .Sy large_blocks
 pool feature enabled as well.
+.Pp
+Replicating a filesystem that contains large blocks without this flag
+splits them into 128 KiB blocks on the receiving side, so the received
+copy does not activate the
+.Sy large_blocks
+feature.
+The two copies then have different physical block layouts, and an
+incremental stream sent back in the opposite direction is rejected,
+because that stream cannot carry the large blocks the original
+filesystem still has.
+Recovering from this requires a full receive into a new dataset.
+Use this flag from the first replication onwards if the direction of
+replication may ever be reversed.
 See
 .Xr zpool-features 7
 for details on ZFS feature flags and the

@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -33,7 +23,6 @@
  */
 #include <ctype.h>
 #include <errno.h>
-#include <libintl.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -91,20 +80,17 @@ get_stats_for_obj(differ_info_t *di, const char *dsname, uint64_t obj,
 		return (0);
 	} else if (di->zerr == EPERM) {
 		(void) snprintf(di->errbuf, sizeof (di->errbuf),
-		    dgettext(TEXT_DOMAIN,
 		    "The sys_config privilege or diff delegated permission "
-		    "is needed\nto discover path names"));
+		    "is needed\nto discover path names");
 		return (-1);
 	} else if (di->zerr == EACCES) {
 		(void) snprintf(di->errbuf, sizeof (di->errbuf),
-		    dgettext(TEXT_DOMAIN,
-		    "Key must be loaded to discover path names"));
+		    "Key must be loaded to discover path names");
 		return (-1);
 	} else {
 		(void) snprintf(di->errbuf, sizeof (di->errbuf),
-		    dgettext(TEXT_DOMAIN,
 		    "Unable to determine path or stats for "
-		    "object %lld in %s"), (longlong_t)obj, dsname);
+		    "object %lld in %s", (longlong_t)obj, dsname);
 		return (-1);
 	}
 }
@@ -424,8 +410,7 @@ write_free_diffs(FILE *fp, differ_info_t *di, dmu_diff_record_t *dr)
 			break;
 		} else {
 			(void) snprintf(di->errbuf, sizeof (di->errbuf),
-			    dgettext(TEXT_DOMAIN,
-			    "next allocated object (> %lld) find failure"),
+			    "next allocated object (> %lld) find failure",
 			    (longlong_t)zc.zc_obj);
 			di->zerr = errno;
 			break;
@@ -493,8 +478,7 @@ differ(void *arg)
 	if (di->zerr) {
 		ASSERT(di->zerr == EPIPE);
 		(void) snprintf(di->errbuf, sizeof (di->errbuf),
-		    dgettext(TEXT_DOMAIN,
-		    "Internal error: bad data from diff IOCTL"));
+		    "Internal error: bad data from diff IOCTL");
 		return ((void *)-1);
 	}
 	return ((void *)0);
@@ -515,14 +499,14 @@ make_temp_snapshot(differ_info_t *di)
 		int err = errno;
 		if (err == EPERM) {
 			(void) snprintf(di->errbuf, sizeof (di->errbuf),
-			    dgettext(TEXT_DOMAIN, "The diff delegated "
+			    "The diff delegated "
 			    "permission is needed in order\nto create a "
-			    "just-in-time snapshot for diffing\n"));
+			    "just-in-time snapshot for diffing\n");
 			return (zfs_error(hdl, EZFS_DIFF, di->errbuf));
 		} else {
 			(void) snprintf(di->errbuf, sizeof (di->errbuf),
-			    dgettext(TEXT_DOMAIN, "Cannot create just-in-time "
-			    "snapshot of '%s'"), zc.zc_name);
+			    "Cannot create just-in-time "
+			    "snapshot of '%s'", zc.zc_name);
 			return (zfs_standard_error(hdl, err, di->errbuf));
 		}
 	}
@@ -568,8 +552,7 @@ get_snapshot_names(differ_info_t *di, const char *fromsnap,
 	if (tosnap == NULL) {
 		/* only a from snapshot given, must be valid */
 		(void) snprintf(di->errbuf, sizeof (di->errbuf),
-		    dgettext(TEXT_DOMAIN,
-		    "Badly formed snapshot name %s"), fromsnap);
+		    "Badly formed snapshot name %s", fromsnap);
 
 		if (!zfs_validate_name(hdl, fromsnap, ZFS_TYPE_SNAPSHOT,
 		    B_FALSE)) {
@@ -590,8 +573,7 @@ get_snapshot_names(differ_info_t *di, const char *fromsnap,
 	}
 
 	(void) snprintf(di->errbuf, sizeof (di->errbuf),
-	    dgettext(TEXT_DOMAIN,
-	    "Unable to determine which snapshots to compare"));
+	    "Unable to determine which snapshots to compare");
 
 	atptrf = strchr(fromsnap, '@');
 	atptrt = strchr(tosnap, '@');
@@ -632,8 +614,7 @@ get_snapshot_names(differ_info_t *di, const char *fromsnap,
 
 		if (zhp == NULL) {
 			(void) snprintf(di->errbuf, sizeof (di->errbuf),
-			    dgettext(TEXT_DOMAIN,
-			    "Not an earlier snapshot from the same fs"));
+			    "Not an earlier snapshot from the same fs");
 			return (zfs_error(hdl, EZFS_INVALIDNAME, di->errbuf));
 		} else {
 			(void) zfs_close(zhp);
@@ -669,8 +650,7 @@ get_mountpoint(differ_info_t *di, char *dsnm, char **mntpt)
 	mounted = is_mounted(di->zhp->zfs_hdl, dsnm, mntpt);
 	if (mounted == B_FALSE) {
 		(void) snprintf(di->errbuf, sizeof (di->errbuf),
-		    dgettext(TEXT_DOMAIN,
-		    "Cannot diff an unmounted snapshot"));
+		    "Cannot diff an unmounted snapshot");
 		return (zfs_error(di->zhp->zfs_hdl, EZFS_BADTYPE, di->errbuf));
 	}
 
@@ -755,7 +735,7 @@ zfs_show_diffs(zfs_handle_t *zhp, int outfd, const char *fromsnap,
 	int iocerr;
 
 	(void) snprintf(errbuf, sizeof (errbuf),
-	    dgettext(TEXT_DOMAIN, "zfs diff failed"));
+	    "zfs diff failed");
 
 	if (setup_differ_info(zhp, fromsnap, tosnap, &di)) {
 		teardown_differ_info(&di);
@@ -793,15 +773,15 @@ zfs_show_diffs(zfs_handle_t *zhp, int outfd, const char *fromsnap,
 	iocerr = zfs_ioctl(zhp->zfs_hdl, ZFS_IOC_DIFF, &zc);
 	if (iocerr != 0) {
 		(void) snprintf(errbuf, sizeof (errbuf),
-		    dgettext(TEXT_DOMAIN, "Unable to obtain diffs"));
+		    "Unable to obtain diffs");
 		if (errno == EPERM) {
-			zfs_error_aux(zhp->zfs_hdl, dgettext(TEXT_DOMAIN,
+			zfs_error_aux(zhp->zfs_hdl,
 			    "\n   The sys_mount privilege or diff delegated "
 			    "permission is needed\n   to execute the "
-			    "diff ioctl"));
+			    "diff ioctl");
 		} else if (errno == EXDEV) {
-			zfs_error_aux(zhp->zfs_hdl, dgettext(TEXT_DOMAIN,
-			    "\n   Not an earlier snapshot from the same fs"));
+			zfs_error_aux(zhp->zfs_hdl,
+			    "\n   Not an earlier snapshot from the same fs");
 		} else if (errno != EPIPE || di.zerr == 0) {
 			zfs_error_aux(zhp->zfs_hdl, "%s", zfs_strerror(errno));
 		}

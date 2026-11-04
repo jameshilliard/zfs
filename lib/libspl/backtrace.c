@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2024, Rob Norris <robn@despairlabs.com>
@@ -28,6 +18,14 @@
 #include <sys/types.h>
 #include <sys/debug.h>
 #include <unistd.h>
+
+#ifdef HAVE_VALGRIND_VALGRIND_H
+#include <valgrind/valgrind.h>
+#endif
+
+#if !defined(HAVE_LIBUNWIND) && defined(HAVE_BACKTRACE)
+#include <execinfo.h>
+#endif
 
 /*
  * Output helpers. libspl_backtrace() must not block, must be thread-safe and
@@ -89,10 +87,18 @@ spl_bt_u64_to_hex_str(uint64_t v, size_t n, char *buf, size_t buflen)
 	}
 	return (pos);
 }
+#endif
 
 void
 libspl_backtrace(int fd)
 {
+#if defined(VALGRIND_DISABLE_ERROR_REPORTING) && \
+	defined(VALGRIND_ENABLE_ERROR_REPORTING)
+	/* Unwinder memory probes must not obscure the original failure. */
+	VALGRIND_DISABLE_ERROR_REPORTING;
+#endif
+
+#ifdef HAVE_LIBUNWIND
 	unw_context_t uc;
 	unw_cursor_t cp;
 	unw_word_t v;
@@ -283,21 +289,17 @@ libspl_backtrace(int fd)
 #endif
 		spl_bt_write(fd, "\n");
 	} while (unw_step(&cp) > 0);
-}
 #elif defined(HAVE_BACKTRACE)
-#include <execinfo.h>
-
-void
-libspl_backtrace(int fd)
-{
 	void *btptrs[64];
 	size_t nptrs = backtrace(btptrs, 64);
 	spl_bt_write(fd, "Call trace:\n");
 	backtrace_symbols_fd(btptrs, nptrs, fd);
-}
 #else
-void
-libspl_backtrace(int fd __maybe_unused)
-{
-}
+	(void) fd;
 #endif
+
+#if defined(VALGRIND_DISABLE_ERROR_REPORTING) && \
+	defined(VALGRIND_ENABLE_ERROR_REPORTING)
+	VALGRIND_ENABLE_ERROR_REPORTING;
+#endif
+}

@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  *
@@ -524,6 +514,7 @@ vdev_rebuild_blkptr_init(blkptr_t *bp, vdev_t *vd, uint64_t start,
 {
 	ASSERT(vd->vdev_ops == &vdev_draid_ops ||
 	    vd->vdev_ops == &vdev_mirror_ops ||
+	    vd->vdev_ops == &vdev_anyraid_ops ||
 	    vd->vdev_ops == &vdev_replacing_ops ||
 	    vd->vdev_ops == &vdev_spare_ops);
 
@@ -845,14 +836,17 @@ vdev_rebuild_thread(void *arg)
 		spa_config_exit(spa, SCL_CONFIG, FTAG);
 		metaslab_disable(msp);
 
+		/*
+		 * Wait for remaining sync passes and outstanding allocations
+		 * so all allocated ranges are on disk before rebuilding them.
+		 * Later sync passes can rewrite blocks in place without
+		 * allocating, so waiting for allocations alone is insufficient.
+		 */
+		txg_wait_synced(dp, spa_syncing_txg(spa));
+
 		mutex_enter(&msp->ms_sync_lock);
 		mutex_enter(&msp->ms_lock);
 
-		/*
-		 * If there are outstanding allocations wait for them to be
-		 * synced.  This is needed to ensure all allocated ranges are
-		 * on disk and therefore will be rebuilt.
-		 */
 		for (int j = 0; j < TXG_SIZE; j++) {
 			if (zfs_range_tree_space(msp->ms_allocating[j])) {
 				mutex_exit(&msp->ms_lock);
@@ -864,37 +858,28 @@ vdev_rebuild_thread(void *arg)
 			}
 		}
 
-		/*
-		 * When a metaslab has been allocated from read its allocated
-		 * ranges from the space map object into the vr_scan_tree.
-		 * Then add inflight / unflushed ranges and remove inflight /
-		 * unflushed frees.  This is the minimum range to be rebuilt.
-		 */
-		if (msp->ms_sm != NULL) {
-			VERIFY0(space_map_load(msp->ms_sm,
-			    vr->vr_scan_tree, SM_ALLOC));
-
-			for (int i = 0; i < TXG_SIZE; i++) {
-				ASSERT0(zfs_range_tree_space(
-				    msp->ms_allocating[i]));
-			}
-
-			zfs_range_tree_walk(msp->ms_unflushed_allocs,
-			    zfs_range_tree_add, vr->vr_scan_tree);
-			zfs_range_tree_walk(msp->ms_unflushed_frees,
-			    zfs_range_tree_remove, vr->vr_scan_tree);
-
-			/*
-			 * Remove ranges which have already been rebuilt based
-			 * on the last offset.  This can happen when restarting
-			 * a scan after exporting and re-importing the pool.
-			 */
-			zfs_range_tree_clear(vr->vr_scan_tree, 0,
-			    vrp->vrp_last_offset);
-		}
-
+		error = metaslab_load_allocated(msp, vr->vr_scan_tree, B_FALSE);
 		mutex_exit(&msp->ms_lock);
 		mutex_exit(&msp->ms_sync_lock);
+		if (error != 0) {
+			/*
+			 * An unavailable allocation map must not leave missing
+			 * data unrebuilt.  Scan the whole metaslab instead.
+			 * Allocations remain disabled until the rebuild I/O has
+			 * synced, so copying free space cannot race its reuse.
+			 */
+			ASSERT(zfs_range_tree_is_empty(vr->vr_scan_tree));
+			zfs_range_tree_add(vr->vr_scan_tree, msp->ms_start,
+			    msp->ms_size);
+			zfs_dbgmsg("rebuild: unable to load metaslab %llu "
+			    "on vdev %llu: error %d; "
+			    "rebuilding entire metaslab",
+			    (u_longlong_t)msp->ms_id,
+			    (u_longlong_t)vd->vdev_id, error);
+		}
+
+		/* Discard ranges completed before an export and re-import. */
+		zfs_range_tree_clear(vr->vr_scan_tree, 0, vrp->vrp_last_offset);
 
 		/*
 		 * To provide an accurate estimate re-calculate the estimated

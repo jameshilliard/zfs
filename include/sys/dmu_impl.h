@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright 2010 Sun Microsystems, Inc.  All rights reserved.
@@ -252,13 +242,28 @@ typedef struct dmu_sendstatus {
 } dmu_sendstatus_t;
 
 /*
+ * A dmu_sync() that found another dmu_sync() of the same buffer in progress,
+ * and is waiting for that write's blkptr.  dsw_zio is an unissued child of
+ * the waiter's log block zio, which holds that log block until
+ * dmu_sync_done() fills in its blkptr and issues dsw_zio.
+ */
+typedef struct dmu_sync_waiter {
+	list_node_t		dsw_node;
+	void (*dsw_done)(struct zgd *, int);
+	struct zgd		*dsw_zgd;
+	zio_t			*dsw_zio;
+} dmu_sync_waiter_t;
+
+/*
  * dmu_sync_{ready/done} args
  */
-typedef struct {
+typedef struct dmu_sync_arg {
 	dbuf_dirty_record_t	*dsa_dr;
 	void (*dsa_done)(struct zgd *, int);
 	struct zgd		*dsa_zgd;
 	dmu_tx_t		*dsa_tx;
+	uint32_t		*dsa_dio_verify_fails;
+	list_t			dsa_waiters;	/* dmu_sync_waiter_t */
 } dmu_sync_arg_t;
 
 void dmu_sync_done(zio_t *, arc_buf_t *buf, void *varg);
@@ -267,7 +272,8 @@ void dmu_sync_ready(zio_t *, arc_buf_t *buf, void *varg);
 void dmu_object_zapify(objset_t *, uint64_t, dmu_object_type_t, dmu_tx_t *);
 void dmu_object_free_zapified(objset_t *, uint64_t, dmu_tx_t *);
 
-int dmu_write_direct(zio_t *, dmu_buf_impl_t *, abd_t *, dmu_tx_t *);
+int dmu_write_direct(zio_t *, dmu_buf_impl_t *, abd_t *, dmu_tx_t *,
+    uint32_t *);
 int dmu_read_abd(dnode_t *, uint64_t, uint64_t, abd_t *, dmu_flags_t);
 int dmu_write_abd(dnode_t *, uint64_t, uint64_t, abd_t *, dmu_flags_t,
     dmu_tx_t *);

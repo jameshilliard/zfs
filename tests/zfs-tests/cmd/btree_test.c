@@ -7,7 +7,7 @@
  *
  * A full copy of the text of the CDDL should have accompanied this
  * source.  A copy of the CDDL is also available via the Internet at
- * http://www.illumos.org/license/CDDL.
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -298,7 +298,7 @@ insert_duplicate(zfs_btree_t *bt)
 	}
 
 	/* Crash on inserting a duplicate */
-	zfs_btree_add_idx(bt, &i, NULL);
+	zfs_btree_add(bt, &i);
 
 	return (0);
 }

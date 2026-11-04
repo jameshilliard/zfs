@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -41,9 +31,6 @@
 #include <sys/zfeature.h>
 #include <sys/zfs_file.h>
 #include <sys/zfs_context.h>
-#ifdef _KERNEL
-#include <sys/zone.h>
-#endif
 
 /*
  * Pool configuration repository.
@@ -55,7 +42,7 @@
  * 'cachefile' property set which allows this config to be stored in an
  * alternate location under the control of external software.
  *
- * The kernel independantly maintains an AVL tree of imported pools.  See the
+ * The kernel independently maintains an AVL tree of imported pools.  See the
  * "SPA locking" comment in spa.c.  Whenever a pool configuration is modified
  * we call spa_write_cachefile() which walks through all the active pools and
  * writes the updated configuration to to /etc/zfs/zpool.cache file.
@@ -84,7 +71,7 @@ spa_config_remove(spa_config_dirent_t *dp)
 		int flags = O_RDWR | O_TRUNC;
 		zfs_file_t *fp;
 
-		error = zfs_file_open(dp->scd_path, flags, 0644, &fp);
+		error = zfs_file_open(dp->scd_path, flags, 0644, kcred, &fp);
 		if (error == 0) {
 			(void) zfs_file_fsync(fp, O_SYNC);
 			(void) zfs_file_close(fp);
@@ -127,7 +114,7 @@ spa_config_write(spa_config_dirent_t *dp, nvlist_t *nvl)
 	 * is instead truncated and overwritten in place.  This way we always
 	 * have a consistent view of the data or a zero length file.
 	 */
-	err = zfs_file_open(dp->scd_path, oflags, 0644, &fp);
+	err = zfs_file_open(dp->scd_path, oflags, 0644, kcred, &fp);
 	if (err == 0) {
 		err = zfs_file_write(fp, buf, buflen, NULL);
 		if (err == 0)
@@ -428,9 +415,12 @@ spa_config_generate(spa_t *spa, vdev_t *vd, uint64_t txg, int getstats)
 		fnvlist_add_uint64(config, ZPOOL_CONFIG_SPLIT_GUID, split_guid);
 	}
 
-	nvroot = vdev_config_generate(spa, vd, getstats, config_gen_flags);
+	/* Add the vdev tree empty and build it in place to avoid a copy. */
+	nvroot = fnvlist_alloc();
 	fnvlist_add_nvlist(config, ZPOOL_CONFIG_VDEV_TREE, nvroot);
 	nvlist_free(nvroot);
+	nvroot = fnvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE);
+	vdev_config_generate_impl(spa, vd, nvroot, getstats, config_gen_flags);
 
 	/*
 	 * Store what's necessary for reading the MOS in the label.

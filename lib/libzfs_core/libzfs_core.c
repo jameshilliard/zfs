@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -80,6 +70,7 @@
 #include <libzfs_core.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef ZFS_DEBUG
@@ -717,7 +708,28 @@ send_worker(void *arg)
 {
 	struct send_worker_ctx *ctx = arg;
 	unsigned int bufsiz = max_pipe_buffer(ctx->from);
-	ssize_t rd;
+	sigset_t block_mask;
+	ssize_t rd = -1;
+
+	/*
+	 * When users request verbose status information about the
+	 * send progress SIGUSR1 is delivered periodically in libzfs
+	 * to a dedicated thread.
+	 *
+	 * However, we get created before this progress thread is
+	 * created and the signal mask of the parent is only modified to
+	 * block SIGUSR1 afterwards.
+	 *
+	 * Block delivery of USR1 to us such that we don't get
+	 * interrupted and the right thread gets the signal.
+	 */
+	sigemptyset(&block_mask);
+	sigaddset(&block_mask, SIGUSR1);
+	int err = pthread_sigmask(SIG_BLOCK, &block_mask, NULL);
+	if (err != 0) {
+		close(ctx->from);
+		return ((void *)(uintptr_t)err);
+	}
 
 	for (;;) {
 		rd = splice(ctx->from, NULL, ctx->to, NULL, bufsiz,
@@ -725,7 +737,8 @@ send_worker(void *arg)
 		if ((rd == -1 && errno != EINTR) || rd == 0)
 			break;
 	}
-	int err = (rd == -1) ? errno : 0;
+
+	err = (rd == -1) ? errno : 0;
 	close(ctx->from);
 	return ((void *)(uintptr_t)err);
 }
@@ -1676,6 +1689,10 @@ lzc_channel_program_impl(const char *pool, const char *program, boolean_t sync,
  * ETIME    The program was terminated because it exceeded its Lua instruction
  *          limit. Some portion of the channel program may have executed and
  *          committed changes to disk. No output is returned through 'outnvl'.
+ *
+ * EROFS    The pool is imported read-only. Channel programs that run in
+ *          syncing context require a writable pool. No part of the channel
+ *          program was executed.
  */
 int
 lzc_channel_program(const char *pool, const char *program, uint64_t instrlimit,
@@ -1782,8 +1799,12 @@ lzc_pool_prefetch(const char *pool, zpool_prefetch_type_t type)
  * return faster. The downside to that, is that the program cannot change
  * on-disk state by calling functions from the zfs.sync submodule.
  *
- * The return values of this function (and their meaning) are exactly the
- * same as the ones described in lzc_channel_program().
+ * A read-only channel program can also be run on a pool that is imported
+ * read-only.
+ *
+ * The return values of this function (and their meaning) are the same as
+ * the ones described in lzc_channel_program(), except that EROFS is never
+ * returned.
  */
 int
 lzc_channel_program_nosync(const char *pool, const char *program,

@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -29,7 +19,7 @@
 #include <assert.h>
 #include <pthread.h>
 #include <errno.h>
-#include <atomic.h>
+#include <sys/atomic.h>
 #include <sys/rwlock.h>
 
 /*
@@ -44,7 +34,7 @@ rw_init(krwlock_t *rwlp, char *name, int type, void *arg)
 	(void) name, (void) type, (void) arg;
 	VERIFY0(pthread_rwlock_init(&rwlp->rw_lock, NULL));
 	rwlp->rw_readers = 0;
-	rwlp->rw_owner = 0;
+	rwlp->rw_owner = NULL;
 }
 
 void
@@ -61,7 +51,7 @@ rw_enter(krwlock_t *rwlp, krw_t rw)
 		atomic_inc_uint(&rwlp->rw_readers);
 	} else {
 		VERIFY0(pthread_rwlock_wrlock(&rwlp->rw_lock));
-		rwlp->rw_owner = pthread_self();
+		rwlp->rw_owner = curthread;
 	}
 }
 
@@ -71,7 +61,7 @@ rw_exit(krwlock_t *rwlp)
 	if (RW_READ_HELD(rwlp))
 		atomic_dec_uint(&rwlp->rw_readers);
 	else
-		rwlp->rw_owner = 0;
+		rwlp->rw_owner = NULL;
 
 	VERIFY0(pthread_rwlock_unlock(&rwlp->rw_lock));
 }
@@ -90,7 +80,7 @@ rw_tryenter(krwlock_t *rwlp, krw_t rw)
 		if (rw == RW_READER)
 			atomic_inc_uint(&rwlp->rw_readers);
 		else
-			rwlp->rw_owner = pthread_self();
+			rwlp->rw_owner = curthread;
 
 		return (1);
 	}

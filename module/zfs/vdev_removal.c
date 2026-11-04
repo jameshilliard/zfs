@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -319,7 +309,7 @@ spa_vdev_noalloc(spa_t *spa, uint64_t guid)
 	vd = spa_lookup_by_guid(spa, guid, B_FALSE);
 
 	if (vd == NULL)
-		error = SET_ERROR(ENOENT);
+		error = SET_ERROR(ENODEV);
 	else if (vd->vdev_mg == NULL)
 		error = SET_ERROR(ZFS_ERR_VDEV_NOTSUP);
 	else if (!vd->vdev_noalloc)
@@ -352,7 +342,7 @@ spa_vdev_alloc(spa_t *spa, uint64_t guid)
 	vd = spa_lookup_by_guid(spa, guid, B_FALSE);
 
 	if (vd == NULL)
-		error = SET_ERROR(ENOENT);
+		error = SET_ERROR(ENODEV);
 	else if (vd->vdev_mg == NULL)
 		error = SET_ERROR(ZFS_ERR_VDEV_NOTSUP);
 	else if (!vd->vdev_removing)
@@ -1684,17 +1674,7 @@ again:
 			ASSERT0(zfs_range_tree_space(msp->ms_allocating[i]));
 		}
 
-		/*
-		 * If the metaslab has ever been synced (ms_sm != NULL),
-		 * read the allocated segments from the space map object
-		 * into svr_allocd_segs. Since we do this while holding
-		 * ms_lock and ms_sync_lock, concurrent frees (which
-		 * would have modified the space map) will wait for us
-		 * to finish loading the spacemap, and then take the
-		 * appropriate action (see free_from_removing_vdev()).
-		 */
-		if (msp->ms_sm != NULL)
-			VERIFY0(space_map_load(msp->ms_sm, segs, SM_ALLOC));
+		int error = metaslab_load_allocated(msp, segs, B_TRUE);
 
 		/*
 		 * We could not hold svr_lock while loading space map, or we
@@ -1710,13 +1690,17 @@ again:
 			goto again;
 		}
 
+		if (error != 0) {
+			mutex_exit(&msp->ms_lock);
+			mutex_exit(&msp->ms_sync_lock);
+			zfs_dbgmsg("removal: unable to load metaslab %llu "
+			    "on vdev %llu: error %d",
+			    (u_longlong_t)msp->ms_id,
+			    (u_longlong_t)vd->vdev_id, error);
+			svr->svr_thread_exit = B_TRUE;
+			break;
+		}
 		zfs_range_tree_swap(&segs, &svr->svr_allocd_segs);
-		zfs_range_tree_walk(msp->ms_unflushed_allocs,
-		    zfs_range_tree_add, svr->svr_allocd_segs);
-		zfs_range_tree_walk(msp->ms_unflushed_frees,
-		    zfs_range_tree_remove, svr->svr_allocd_segs);
-		zfs_range_tree_walk(msp->ms_freeing,
-		    zfs_range_tree_remove, svr->svr_allocd_segs);
 
 		mutex_exit(&msp->ms_lock);
 		mutex_exit(&msp->ms_sync_lock);
@@ -1812,6 +1796,20 @@ again:
 	txg_wait_synced(spa->spa_dsl_pool, 0);
 	ASSERT0(vca.vca_outstanding_bytes);
 
+	/*
+	 * Every copy has reported by now.  The errors of the last segments
+	 * copied may have arrived after the check at the end of the loop
+	 * above, so check again before concluding that the removal can be
+	 * completed.  Otherwise the removal of the last metaslab racing its
+	 * own write errors would drop the vdev with data left uncopied.
+	 */
+	if (zfs_removal_ignore_errors == 0 &&
+	    (vca.vca_read_error_bytes > 0 || vca.vca_write_error_bytes > 0)) {
+		mutex_enter(&svr->svr_lock);
+		svr->svr_thread_exit = B_TRUE;
+		mutex_exit(&svr->svr_lock);
+	}
+
 	mutex_destroy(&vca.vca_lock);
 	cv_destroy(&vca.vca_cv);
 
@@ -1885,12 +1883,52 @@ vdev_prop_allocating_off(vdev_t *vd)
 static int
 spa_vdev_remove_cancel_check(void *arg, dmu_tx_t *tx)
 {
-	(void) arg;
+	zfs_range_tree_t *allocated = arg;
 	spa_t *spa = dmu_tx_pool(tx)->dp_spa;
 
 	if (spa->spa_vdev_removal == NULL)
 		return (ENOTACTIVE);
-	return (0);
+	if (!dmu_tx_is_syncing(tx))
+		return (0);
+
+	/*
+	 * Validate and retain the mapped allocations before changing any
+	 * removal metadata. A corrupt map must leave cancellation unapplied,
+	 * not free an uncertain range or fail halfway through the sync task.
+	 */
+	spa_vdev_removal_t *svr = spa->spa_vdev_removal;
+	vdev_t *vd = vdev_lookup_top(spa, svr->svr_vdev_id);
+	uint64_t syncd =
+	    vdev_indirect_mapping_max_offset(vd->vdev_indirect_mapping);
+	zfs_range_tree_t *segs = zfs_range_tree_create_flags(
+	    NULL, ZFS_RANGE_SEG64, NULL, 0, 0, ZFS_RT_F_DYN_NAME,
+	    vdev_rt_name(vd, "spa_vdev_remove_cancel_check:segs"));
+	int error = 0;
+	zfs_range_tree_vacate(allocated, NULL, NULL);
+	for (uint64_t msi = 0; msi < vd->vdev_ms_count; msi++) {
+		metaslab_t *msp = vd->vdev_ms[msi];
+		if (msp->ms_start >= syncd)
+			break;
+		mutex_enter(&msp->ms_lock);
+		for (int i = 0; i < TXG_SIZE; i++)
+			ASSERT0(zfs_range_tree_space(msp->ms_allocating[i]));
+		for (int i = 0; i < TXG_DEFER_SIZE; i++)
+			ASSERT0(zfs_range_tree_space(msp->ms_defer[i]));
+		ASSERT0(zfs_range_tree_space(msp->ms_freed));
+		error = metaslab_load_allocated(msp, segs, B_TRUE);
+		mutex_exit(&msp->ms_lock);
+		if (error != 0)
+			break;
+
+		uint64_t end = msp->ms_start + msp->ms_size;
+		if (end > syncd)
+			zfs_range_tree_clear(segs, syncd, end - syncd);
+		zfs_range_tree_vacate(segs, zfs_range_tree_add, allocated);
+	}
+	zfs_range_tree_destroy(segs);
+	if (error != 0)
+		zfs_range_tree_vacate(allocated, NULL, NULL);
+	return (error);
 }
 
 /*
@@ -1900,7 +1938,7 @@ spa_vdev_remove_cancel_check(void *arg, dmu_tx_t *tx)
 static void
 spa_vdev_remove_cancel_sync(void *arg, dmu_tx_t *tx)
 {
-	(void) arg;
+	zfs_range_tree_t *allocated = arg;
 	spa_t *spa = dmu_tx_pool(tx)->dp_spa;
 	spa_vdev_removal_t *svr = spa->spa_vdev_removal;
 	vdev_t *vd = vdev_lookup_top(spa, svr->svr_vdev_id);
@@ -1940,51 +1978,8 @@ spa_vdev_remove_cancel_sync(void *arg, dmu_tx_t *tx)
 		    vdev_indirect_mapping_max_offset(vim));
 	}
 
-	zfs_range_tree_t *segs = zfs_range_tree_create_flags(
-	    NULL, ZFS_RANGE_SEG64, NULL, 0, 0, ZFS_RT_F_DYN_NAME,
-	    vdev_rt_name(vd, "spa_vdev_remove_cancel_sync:segs"));
-	for (uint64_t msi = 0; msi < vd->vdev_ms_count; msi++) {
-		metaslab_t *msp = vd->vdev_ms[msi];
-
-		if (msp->ms_start >= vdev_indirect_mapping_max_offset(vim))
-			break;
-
-		ASSERT0(zfs_range_tree_space(svr->svr_allocd_segs));
-
-		mutex_enter(&msp->ms_lock);
-
-		/*
-		 * Assert nothing in flight -- ms_*tree is empty.
-		 */
-		for (int i = 0; i < TXG_SIZE; i++)
-			ASSERT0(zfs_range_tree_space(msp->ms_allocating[i]));
-		for (int i = 0; i < TXG_DEFER_SIZE; i++)
-			ASSERT0(zfs_range_tree_space(msp->ms_defer[i]));
-		ASSERT0(zfs_range_tree_space(msp->ms_freed));
-
-		if (msp->ms_sm != NULL)
-			VERIFY0(space_map_load(msp->ms_sm, segs, SM_ALLOC));
-
-		zfs_range_tree_walk(msp->ms_unflushed_allocs,
-		    zfs_range_tree_add, segs);
-		zfs_range_tree_walk(msp->ms_unflushed_frees,
-		    zfs_range_tree_remove, segs);
-		zfs_range_tree_walk(msp->ms_freeing,
-		    zfs_range_tree_remove, segs);
-		mutex_exit(&msp->ms_lock);
-
-		/*
-		 * Clear everything past what has been synced,
-		 * because we have not allocated mappings for it yet.
-		 */
-		uint64_t syncd = vdev_indirect_mapping_max_offset(vim);
-		uint64_t ms_end = msp->ms_start + msp->ms_size;
-		if (ms_end > syncd)
-			zfs_range_tree_clear(segs, syncd, ms_end - syncd);
-
-		zfs_range_tree_vacate(segs, free_mapped_segment_cb, vd);
-	}
-	zfs_range_tree_destroy(segs);
+	ASSERT0(zfs_range_tree_space(svr->svr_allocd_segs));
+	zfs_range_tree_vacate(allocated, free_mapped_segment_cb, vd);
 
 	/*
 	 * Note: this must happen after we invoke free_mapped_segment_cb,
@@ -2038,9 +2033,13 @@ spa_vdev_remove_cancel_sync(void *arg, dmu_tx_t *tx)
 static int
 spa_vdev_remove_cancel_impl(spa_t *spa)
 {
+	zfs_range_tree_t *allocated = zfs_range_tree_create_flags(NULL,
+	    ZFS_RANGE_SEG64, NULL, 0, 0, 0, "spa_vdev_remove_cancel:allocated");
 	int error = dsl_sync_task(spa->spa_name, spa_vdev_remove_cancel_check,
-	    spa_vdev_remove_cancel_sync, NULL, 0,
+	    spa_vdev_remove_cancel_sync, allocated, 0,
 	    ZFS_SPACE_CHECK_EXTRA_RESERVED);
+	zfs_range_tree_vacate(allocated, NULL, NULL);
+	zfs_range_tree_destroy(allocated);
 	return (error);
 }
 
@@ -2276,6 +2275,21 @@ spa_vdev_remove_top_check(vdev_t *vd)
 	 */
 	if (!vdev_dtl_empty(vd, DTL_MISSING) ||
 	    !vdev_dtl_empty(vd, DTL_OUTAGE))
+		return (SET_ERROR(EBUSY));
+
+	/*
+	 * DTL_MISSING of a mirror only records ranges missing from every
+	 * child, so it is empty while a single child is still being
+	 * resilvered or rebuilt.  The removal copy neither consults the
+	 * children's DTLs nor verifies checksums, so it may read stale data
+	 * from such a child.  Wait until no child's DTL_MISSING needs to be
+	 * resilvered; a sequential rebuild keeps it until it completes.
+	 * Children that can't be written (e.g. offline or faulted) are not
+	 * counted: the copy doesn't read them either, and a degraded mirror
+	 * can still be removed.  DTL_PARTIAL of the mirror would also
+	 * include the txgs only those children are missing.
+	 */
+	if (vdev_resilver_needed(vd, NULL, NULL))
 		return (SET_ERROR(EBUSY));
 
 	/*

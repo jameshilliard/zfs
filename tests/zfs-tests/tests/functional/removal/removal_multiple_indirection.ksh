@@ -1,8 +1,6 @@
 #! /bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
-#
 # This file and its contents are supplied under the terms of the
 # Common Development and Distribution License ("CDDL"), version 1.0.
 # You may only use this file in accordance with the terms of version
@@ -10,9 +8,7 @@
 #
 # A full copy of the text of the CDDL should have accompanied this
 # source.  A copy of the CDDL is also available via the Internet at
-# http://www.illumos.org/license/CDDL.
-#
-# CDDL HEADER END
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -58,10 +54,10 @@ function cleanup
 	default_cleanup_noexit
 	log_must rm -rf $DISKDIR
 
-	# reset REMOVE_MAX_SEGMENT to 1M
-	set_tunable32 REMOVE_MAX_SEGMENT 1048576
+	set_tunable32 REMOVE_MAX_SEGMENT $saved_max_segment
 }
 
+typeset saved_max_segment=$(get_tunable REMOVE_MAX_SEGMENT)
 log_onexit cleanup
 
 # set REMOVE_MAX_SEGMENT to 32k

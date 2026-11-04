@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -211,6 +201,11 @@ free_verify(dmu_buf_impl_t *db, uint64_t start, uint64_t end, dmu_tx_t *tx)
 			continue;
 		ASSERT0(err);
 		ASSERT0(child->db_level);
+		/*
+		 * Open context can undirty the child's newer records while
+		 * we look: hold db_mtx across the dirty-record walk.
+		 */
+		mutex_enter(&child->db_mtx);
 		dr = dbuf_find_dirty_eq(child, txg);
 
 		/* data_old better be zeroed */
@@ -232,7 +227,6 @@ free_verify(dmu_buf_impl_t *db, uint64_t start, uint64_t end, dmu_tx_t *tx)
 		 * db_data better be zeroed unless it's dirty in a
 		 * future txg.
 		 */
-		mutex_enter(&child->db_mtx);
 		buf = child->db.db_data;
 		if (buf != NULL && child->db_state != DB_FILL &&
 		    list_is_empty(&child->db_dirty_records)) {
@@ -444,7 +438,7 @@ dnode_sync_free_range_impl(dnode_t *dn, uint64_t blkid, uint64_t nblks,
 }
 
 /*
- * Try to kick all the dnode's dbufs out of the cache...
+ * Try to kick all the dnode's dbufs out of the cache.
  */
 void
 dnode_evict_dbufs(dnode_t *dn)
@@ -596,7 +590,9 @@ dnode_sync_free(dnode_t *dn, dmu_tx_t *tx)
 	ASSERT(dn->dn_type != DMU_OT_NONE);
 
 	ASSERT(dn->dn_free_txg > 0);
-	if (dn->dn_allocated_txg != dn->dn_free_txg)
+	/* A special dnode is in the objset_phys_t, which is always written. */
+	if (!DMU_OBJECT_IS_SPECIAL(dn->dn_object) &&
+	    dn->dn_allocated_txg != dn->dn_free_txg)
 		dmu_buf_will_dirty(&dn->dn_dbuf->db, tx);
 	memset(dn->dn_phys, 0, sizeof (dnode_phys_t) * dn->dn_num_slots);
 	dnode_free_interior_slots(dn);
@@ -611,6 +607,10 @@ dnode_sync_free(dnode_t *dn, dmu_tx_t *tx)
 	mutex_exit(&dn->dn_mtx);
 
 	ASSERT(dn->dn_object != DMU_META_DNODE_OBJECT);
+
+	/* dnode_setdirty() does not add a hold to special dnodes. */
+	if (DMU_OBJECT_IS_SPECIAL(dn->dn_object))
+		return;
 
 	dnode_rele(dn, (void *)(uintptr_t)tx->tx_txg);
 	/*
@@ -700,12 +700,12 @@ dnode_sync(dnode_t *dn, dmu_tx_t *tx)
 	ASSERT(dn->dn_dbuf == NULL || arc_released(dn->dn_dbuf->db_buf));
 
 	/*
-	 * Do user accounting if it is enabled and this is not
-	 * an encrypted receive.
+	 * Do user accounting if it is enabled and this is not a raw
+	 * receive.
 	 */
 	if (dmu_objset_userused_enabled(os) &&
 	    !DMU_OBJECT_IS_SPECIAL(dn->dn_object) &&
-	    (!os->os_encrypted || !dmu_objset_is_receiving(os))) {
+	    !os->os_raw_receive) {
 		mutex_enter(&dn->dn_mtx);
 		dn->dn_oldused = DN_USED_BYTES(dn->dn_phys);
 		dn->dn_oldflags = dn->dn_phys->dn_flags;
@@ -715,7 +715,18 @@ dnode_sync(dnode_t *dn, dmu_tx_t *tx)
 			    DNODE_FLAG_USEROBJUSED_ACCOUNTED;
 		mutex_exit(&dn->dn_mtx);
 		dmu_objset_userquota_get_ids(dn, B_FALSE, tx);
-	} else if (!(os->os_encrypted && dmu_objset_is_receiving(os))) {
+	} else if (os->os_raw_receive &&
+	    !DMU_OBJECT_IS_SPECIAL(dn->dn_object)) {
+		/*
+		 * A raw receive throws the accounting away, see
+		 * receive_reset_accounting().  The block's MAC doesn't
+		 * cover these flags.
+		 */
+		mutex_enter(&dn->dn_mtx);
+		dn->dn_phys->dn_flags &= ~(DNODE_FLAG_USERUSED_ACCOUNTED |
+		    DNODE_FLAG_USEROBJUSED_ACCOUNTED);
+		mutex_exit(&dn->dn_mtx);
+	} else if (!os->os_raw_receive) {
 		/*
 		 * Once we account for it, we should always account for it,
 		 * except for the case of a raw receive. We will not be able

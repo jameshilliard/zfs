@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -45,13 +35,9 @@
 #include <rpc/types.h>
 #include <rpc/xdr.h>
 #include <sys/mod.h>
-
-#if defined(_KERNEL)
 #include <sys/sunddi.h>
 #include <sys/sysmacros.h>
-#else
-#include <stdarg.h>
-#include <stdlib.h>
+#ifndef _KERNEL
 #include <stddef.h>
 #endif
 
@@ -318,9 +304,11 @@ nvt_nvpair_match(const nvpair_t *nvp1, const nvpair_t *nvp2, uint32_t nvflag)
 		if (strcmp(NVP_NAME(nvp1), NVP_NAME(nvp2)) == 0 &&
 		    NVP_TYPE(nvp1) == NVP_TYPE(nvp2))
 			match = B_TRUE;
-	} else {
-		ASSERT(nvflag == 0 || nvflag & NV_UNIQUE_NAME);
+	} else if (nvflag & NV_UNIQUE_NAME) {
 		if (strcmp(NVP_NAME(nvp1), NVP_NAME(nvp2)) == 0)
+			match = B_TRUE;
+	} else {
+		if (nvp1 == nvp2)
 			match = B_TRUE;
 	}
 	return (match);
@@ -503,7 +491,7 @@ nvt_remove_nvpair(nvlist_t *nvl, const nvpair_t *nvp)
 }
 
 static int
-nvt_add_nvpair(nvlist_t *nvl, nvpair_t *nvp)
+nvt_add_nvpair(nvlist_t *nvl, nvpair_t *nvp, boolean_t check_dup)
 {
 	nvpriv_t *priv = (nvpriv_t *)(uintptr_t)nvl->nvl_priv;
 
@@ -516,9 +504,10 @@ nvt_add_nvpair(nvlist_t *nvl, nvpair_t *nvp)
 
 	/*
 	 * if we don't allow duplicate entries, make sure to
-	 * unlink any existing entries from the table.
+	 * unlink any existing entries from the table.  A caller that
+	 * has already removed them passes B_FALSE to skip the search.
 	 */
-	if (nvl->nvl_nvflag != 0) {
+	if (check_dup && nvl->nvl_nvflag != 0) {
 		int err = nvt_remove_nvpair(nvl, nvp);
 		if (err != 0)
 			return (err);
@@ -1111,6 +1100,21 @@ i_get_value_size(data_type_t type, const void *data, uint_t nelem,
 			uint_t i;
 			size_t newsize;
 
+			/*
+			 * Packed STRING_ARRAY values start with a pointer table
+			 * (nelem * sizeof (uint64_t)), with the strings
+			 * following.  We need to skip the pointer table for
+			 * the strnlen() bounds check to function as intended.
+			 * We distinguish packed STRING_ARRAY values from
+			 * arbitrary ones using the value of max_size.
+			 */
+			if (max_size != (size_t)INT32_MAX) {
+				/* packed value region */
+				if (max_size < value_sz)
+					return (-1);
+				max_size -= (size_t)value_sz;
+			}
+
 			/* no alignment requirement for strings */
 			for (i = 0; i < nelem; i++) {
 				if (strs[i] == NULL)
@@ -1290,7 +1294,7 @@ nvlist_add_common(nvlist_t *nvl, const char *name,
 	else if (nvl->nvl_nvflag & NV_UNIQUE_NAME_TYPE)
 		(void) nvlist_remove(nvl, name, type);
 
-	err = nvt_add_nvpair(nvl, nvp);
+	err = nvt_add_nvpair(nvl, nvp, B_FALSE);
 	if (err != 0) {
 		nvpair_free(nvp);
 		nvp_buf_free(nvl, nvp);
@@ -2441,7 +2445,7 @@ nvs_decode_pairs(nvstream_t *nvs, nvlist_t *nvl)
 			return (EFAULT);
 		}
 
-		err = nvt_add_nvpair(nvl, nvp);
+		err = nvt_add_nvpair(nvl, nvp, B_TRUE);
 		if (err != 0) {
 			nvpair_free(nvp);
 			nvp_buf_free(nvl, nvp);
@@ -2980,7 +2984,7 @@ nvpair_native_embedded_array(nvstream_t *nvs, nvpair_t *nvp)
 	return (nvs_embedded_nvl_array(nvs, nvp, NULL));
 }
 
-static void
+static int
 nvpair_native_string_array(nvstream_t *nvs, nvpair_t *nvp)
 {
 	switch (nvs->nvs_op) {
@@ -2999,15 +3003,32 @@ nvpair_native_string_array(nvstream_t *nvs, nvpair_t *nvp)
 	case NVS_OP_DECODE: {
 		char **strp = (void *)NVP_VALUE(nvp);
 		char *buf = ((char *)strp + NVP_NELEM(nvp) * sizeof (uint64_t));
+		char *end = (char *)nvp + nvp->nvp_size;
 		int i;
 
 		for (i = 0; i < NVP_NELEM(nvp); i++) {
+			size_t max, len;
+
+			if (buf >= end)
+				return (EFAULT);
+
+			max = (size_t)(end - buf);
+			len = strnlen(buf, max);
+
+			/*
+			 * The nvpair is corrupt if any of the strings are
+			 * unterminated.
+			 */
+			if (len == max)
+				return (EFAULT);
+
 			strp[i] = buf;
-			buf += strlen(buf) + 1;
+			buf += len + 1;
 		}
 		break;
 	}
 	}
+	return (0);
 }
 
 static int
@@ -3058,7 +3079,7 @@ nvs_native_nvp_op(nvstream_t *nvs, nvpair_t *nvp)
 		ret = nvpair_native_embedded_array(nvs, nvp);
 		break;
 	case DATA_TYPE_STRING_ARRAY:
-		nvpair_native_string_array(nvs, nvp);
+		ret = nvpair_native_string_array(nvs, nvp);
 		break;
 	default:
 		break;
@@ -3358,7 +3379,7 @@ nvs_xdr_nvp_op(nvstream_t *nvs, nvpair_t *nvp)
 	 * In case of data types DATA_TYPE_STRING and DATA_TYPE_STRING_ARRAY
 	 * is the size of the string(s) excluded.
 	 */
-	if ((value_sz = i_get_value_size(type, NULL, nelem, NVP_SIZE(nvp)) < 0))
+	if ((value_sz = i_get_value_size(type, NULL, nelem, NVP_SIZE(nvp))) < 0)
 		return (EFAULT);
 
 	/* if there is no data to extract then return */

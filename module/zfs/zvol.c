@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (C) 2008-2010 Lawrence Livermore National Security, LLC.
@@ -39,6 +29,7 @@
  * Copyright (c) 2016 Actifio, Inc. All rights reserved.
  * Copyright (c) 2012, 2019 by Delphix. All rights reserved.
  * Copyright (c) 2024, 2025, Klara, Inc.
+ * Copyright 2026 Oxide Computer Company
  */
 
 /*
@@ -80,6 +71,10 @@
  * That is why one can be sure that first, zvol_state_t for a given zvol is
  * allocated and placed on zvol_state_list, and then other minor operations for
  * this zvol are going to proceed in the order of issue.
+ *
+ * zvol_remove_minors_impl() shuts down the zvols it removes in parallel on a
+ * taskq of its own, but waits for all of them before it returns, so the minor
+ * operations of a pool still run one at a time.
  */
 
 #include <sys/dataset_kstats.h>
@@ -533,7 +528,13 @@ zvol_replay_write(void *arg1, void *arg2, boolean_t byteswap)
 	offset = lr->lr_offset;
 	length = lr->lr_length;
 
-	/* If it's a dmu_sync() block, write the whole block */
+	/*
+	 * If it's a dmu_sync() block, write the whole block.  Older software
+	 * dropped the record when dmu_sync() returned EALREADY, leaving that
+	 * write's data only in the block of the TX_WRITE that caused it.  So
+	 * later writes in the block can be replayed even if their own records
+	 * are lost, which a block device allows.
+	 */
 	if (lr->lr_common.lrc_reclen == sizeof (lr_write_t)) {
 		uint64_t blocksize = BP_GET_LSIZE(&lr->lr_blkptr);
 		if (length < blocksize) {
@@ -983,7 +984,7 @@ zvol_log_write(zvol_state_t *zv, dmu_tx_t *tx, uint64_t offset,
 		lr->lr_foid = ZVOL_OBJ;
 		lr->lr_offset = offset;
 		lr->lr_length = len;
-		lr->lr_blkoff = 0;
+		lr->lr_flags = 0;
 		BP_ZERO(&lr->lr_blkptr);
 
 		itx->itx_private = zv;
@@ -1134,6 +1135,7 @@ zvol_setup_zv(zvol_state_t *zv)
 	int error;
 	uint64_t ro;
 	objset_t *os = zv->zv_objset;
+	dsl_pool_t *dp = dmu_objset_pool(os);
 
 	ASSERT(MUTEX_HELD(&zv->zv_state_lock));
 	ASSERT(RW_LOCK_HELD(&zv->zv_suspend_lock));
@@ -1141,7 +1143,10 @@ zvol_setup_zv(zvol_state_t *zv)
 	zv->zv_zilog = NULL;
 	zv->zv_flags &= ~ZVOL_WRITTEN_TO;
 
-	error = dsl_prop_get_integer(zv->zv_name, "readonly", &ro, NULL);
+	/* Not by zv_name, which may not follow a rename yet. */
+	dsl_pool_config_enter(dp, FTAG);
+	error = dsl_prop_get_int_ds(dmu_objset_ds(os), "readonly", &ro);
+	dsl_pool_config_exit(dp, FTAG);
 	if (error)
 		return (error);
 
@@ -1263,10 +1268,17 @@ zvol_resume(zvol_state_t *zv)
 	mutex_enter(&zv->zv_state_lock);
 
 	if (zv->zv_open_count > 0) {
-		VERIFY0(dmu_objset_hold(zv->zv_name, zv, &zv->zv_objset));
-		VERIFY3P(zv->zv_objset->os_dsl_dataset->ds_owner, ==, zv);
-		VERIFY(dsl_dataset_long_held(zv->zv_objset->os_dsl_dataset));
-		dmu_objset_rele(zv->zv_objset, zv);
+		dsl_pool_t *dp;
+		dsl_dataset_t *ds;
+
+		/* By object number, as zv_name may not follow a rename yet. */
+		VERIFY0(dsl_pool_hold(zv->zv_name, FTAG, &dp));
+		VERIFY0(dsl_dataset_hold_obj(dp, zv->zv_dsobj, FTAG, &ds));
+		VERIFY3P(ds->ds_owner, ==, zv);
+		VERIFY(dsl_dataset_long_held(ds));
+		VERIFY0(dmu_objset_from_ds(ds, &zv->zv_objset));
+		dsl_dataset_rele(ds, FTAG);
+		dsl_pool_rele(dp, FTAG);
 
 		error = zvol_setup_zv(zv);
 	}
@@ -1298,8 +1310,29 @@ zvol_first_open(zvol_state_t *zv, boolean_t readonly)
 	ASSERT(MUTEX_HELD(&zv->zv_state_lock));
 	ASSERT(spa_namespace_held());
 
+	/*
+	 * Export drops spa_namespace_lock before it removes the zvols.  Do
+	 * not wait for the export in dmu_objset_own() while holding
+	 * zv_state_lock, since export needs that lock to remove this zvol.
+	 * Fail the same way an open does once the zvol is being removed.
+	 */
+	if (spa_lookup_would_wait(zv->zv_name))
+		return (SET_ERROR(ENXIO));
+
+	/*
+	 * Find the dataset by its object number: zv_name only follows a rename
+	 * once zvol_rename_minors() has run, and may name no dataset, or
+	 * another one, until then.  User accounting, which dmu_objset_own()
+	 * would also upgrade, does not apply to volumes.
+	 */
+	dsl_pool_t *dp;
+	error = dsl_pool_hold(zv->zv_name, FTAG, &dp);
+	if (error)
+		return (error);
 	boolean_t ro = (readonly || (strchr(zv->zv_name, '@') != NULL));
-	error = dmu_objset_own(zv->zv_name, DMU_OST_ZVOL, ro, B_TRUE, zv, &os);
+	error = dmu_objset_own_obj(dp, zv->zv_dsobj, DMU_OST_ZVOL, ro, B_TRUE,
+	    zv, &os);
+	dsl_pool_rele(dp, FTAG);
 	if (error)
 		return (error);
 
@@ -1670,6 +1703,51 @@ zvol_create_minors_impl(zvol_task_t *task)
 }
 
 /*
+ * Maximum number of threads that zvol_remove_minors_impl() uses to shut down
+ * zvols in parallel. They mostly sleep while the kernel tears the devices
+ * down, so this doesn't depend on the number of CPUs.
+ */
+#define	ZVOL_REMOVE_MAX_THREADS	32
+
+/*
+ * Shut down a zvol that zvol_remove_minors_impl() marked ZVOL_REMOVING and
+ * take it off the name lookup lists. The caller frees it. Runs directly or as
+ * a taskq task.
+ */
+static void
+zvol_shutdown_minor(void *arg)
+{
+	zvol_state_t *zv = arg;
+
+	mutex_enter(&zv->zv_state_lock);
+
+	/*
+	 * Still open or suspended, just wait. This can happen if, for
+	 * example, we managed to acquire zv_state_lock in the moments
+	 * where zvol_open() or zvol_release() are trading locks to
+	 * call zvol_first_open() or zvol_last_close().
+	 */
+	while (zv->zv_open_count > 0 ||
+	    atomic_read(&zv->zv_suspend_ref))
+		cv_wait(&zv->zv_removing_cv, &zv->zv_state_lock);
+
+	/*
+	 * No users, shut down the OS side. This may not remove the
+	 * minor from view immediately, depending on the kernel
+	 * specifics, but it will ensure that it is unusable and that
+	 * this zvol_state_t can never again be reached from an OS-side
+	 * operation.
+	 */
+	zvol_os_remove_minor(zv);
+	mutex_exit(&zv->zv_state_lock);
+
+	/* Remove it from the name lookup lists */
+	rw_enter(&zvol_state_lock, RW_WRITER);
+	zvol_remove(zv);
+	rw_exit(&zvol_state_lock);
+}
+
+/*
  * Remove minors for specified dataset and, optionally, its children and
  * snapshots.
  */
@@ -1696,6 +1774,7 @@ zvol_remove_minors_impl(zvol_task_t *task)
 	list_t remove_list;
 	list_create(&remove_list, sizeof (zvol_state_t),
 	    offsetof(zvol_state_t, zv_remove_node));
+	uint_t nremove = 0;
 
 	rw_enter(&zvol_state_lock, RW_READER);
 
@@ -1750,6 +1829,7 @@ zvol_remove_minors_impl(zvol_task_t *task)
 
 			/* Put it on the list for the next stage. */
 			list_insert_head(&remove_list, zv);
+			nremove++;
 		} else
 			mutex_exit(&zv->zv_state_lock);
 	}
@@ -1763,36 +1843,30 @@ zvol_remove_minors_impl(zvol_task_t *task)
 		return;
 	}
 
-	/* Actually shut them all down. */
-	for (zv = list_head(&remove_list); zv != NULL; zv = zv_next) {
-		zv_next = list_next(&remove_list, zv);
-
-		mutex_enter(&zv->zv_state_lock);
-
-		/*
-		 * Still open or suspended, just wait. This can happen if, for
-		 * example, we managed to acquire zv_state_lock in the moments
-		 * where zvol_open() or zvol_release() are trading locks to
-		 * call zvol_first_open() or zvol_last_close().
-		 */
-		while (zv->zv_open_count > 0 ||
-		    atomic_read(&zv->zv_suspend_ref))
-			cv_wait(&zv->zv_removing_cv, &zv->zv_state_lock);
-
-		/*
-		 * No users, shut down the OS side. This may not remove the
-		 * minor from view immediately, depending on the kernel
-		 * specifics, but it will ensure that it is unusable and that
-		 * this zvol_state_t can never again be reached from an OS-side
-		 * operation.
-		 */
-		zvol_os_remove_minor(zv);
-		mutex_exit(&zv->zv_state_lock);
-
-		/* Remove it from the name lookup lists */
-		rw_enter(&zvol_state_lock, RW_WRITER);
-		zvol_remove(zv);
-		rw_exit(&zvol_state_lock);
+	/*
+	 * Actually shut them all down. On Linux, removing a block device waits
+	 * for an RCU grace period, which adds up over many zvols, so shut them
+	 * down in parallel on a taskq of our own. The tasks don't touch
+	 * remove_list, and all of them finish before we free anything.
+	 */
+	taskq_t *tq = NULL;
+	if (nremove > 1) {
+		int nthreads = MIN(nremove, ZVOL_REMOVE_MAX_THREADS);
+		tq = taskq_create("zvol_remove", nthreads, defclsyspri,
+		    nthreads, INT_MAX, 0);
+	}
+	for (zv = list_head(&remove_list); zv != NULL;
+	    zv = list_next(&remove_list, zv)) {
+		if (tq == NULL) {
+			zvol_shutdown_minor(zv);
+		} else {
+			VERIFY(taskq_dispatch(tq, zvol_shutdown_minor, zv,
+			    TQ_SLEEP) != TASKQID_INVALID);
+		}
+	}
+	if (tq != NULL) {
+		taskq_wait(tq);
+		taskq_destroy(tq);
 	}
 
 	/*

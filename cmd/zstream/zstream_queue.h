@@ -1,16 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * This file and its contents are supplied under the terms of the Common
- * Development and Distribution License ("CDDL"), version 1.0. You may only use
- * this file in accordance with the terms of version 1.0 of the CDDL.
- *
- * A full copy of the text of the CDDL should have accompanied this source. A
- * copy of the CDDL is also available via the Internet at
- * http://www.illumos.org/license/CDDL.
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -37,32 +34,44 @@ extern "C" {
  * they wish.
  *
  * The cost function assigns a size_t cost that estimates the amount of work
- * needed to process an item. For operations like hashing and data
- * compression, the natural cost is typically payload length.
+ * needed to process an item. Payload length is a natural cost basis for
+ * operations such as hashing and data compression.
  *
  * It's expected that only a subset of input items will require processing.
  * If an item's cost is 0, it is fast-tracked and never presented to the
  * processing function.
  *
- * The cost function is run as items enter the queue, so it's
- * single-threaded and should return a value promptly. If cost estimation is
- * expensive and important, use a separate queue to implement it.
+ * The cost function is run as items enter the queue, with the queue mutex
+ * held, so it should return a value promptly. If cost estimation is
+ * expensive and important, use a separate queue to implement it. Cost
+ * values should have a roughly linear relationship to processing time.
+ * Only the ratio between costs matters, so choose units that keep the sum
+ * of a batch's costs comfortably inside a size_t.
  *
- * Dispatch granularity is specified as a per-batch budget that is set for
- * each queue in the same (arbitrary) units used for item costs. Threads
- * claim items until the budget is met, there are no more items available,
- * or MAX_BATCH items have been claimed. When claiming items to work on,
- * threads never block waiting for additional work to arrive. They start
- * work as quickly as possible even if the budget has not been reached.
+ * Work is processed in batches whose size is tuned automatically. Each
+ * queue observes how long its own work actually takes per unit of cost, and
+ * claims enough items to fill a fixed slice of processing time. No batch
+ * exceeds ZQ_MAX_BATCH items.
  *
  * All queues share a single thread pool that is managed to avoid
- * contention. Threads are assigned to queues dynamically according to
- * where work is available. When multiple queues have work, threads are
- * allocated among them stochastically with an eye toward preventing
- * pipeline stalls.
+ * contention. Threads are assigned to queues dynamically according to where
+ * work is available. When multiple queues have work, threads are allocated
+ * among them stochastically, in proportion to the amount of unclaimed work
+ * each queue is holding.
+ *
+ * The shared thread pool persists until the process exits.
  */
 
-#define	MAX_BATCH 16	/* The most items that can be claimed at once */
+/*
+ * Implementation constants, exposed only so that tests and diagnostics can
+ * reason about the real boundaries. Except for ZQ_MIN_THREADS, these values
+ * are not caller-tunable. ZQ_MIN_THREADS can be overridden by calling
+ * zstream_queue_set_num_threads().
+ */
+#define	ZQ_SLOTS_PER_QUEUE	4096	/* Ring buffer slots, every queue */
+#define	ZQ_MAX_BATCH		1024	/* Most items claimable at once */
+#define	ZQ_MAX_QUEUES		16	/* Max number of simultaneous queues */
+#define	ZQ_MIN_THREADS		6
 
 typedef void queue_item_t;
 
@@ -81,10 +90,10 @@ zq_process_item_f(queue_item_t *item, void *context);
  * Set the number of threads to be spawned for queue work. Since all queues
  * share a thread pool, this value affects all queues. The value must be set
  * before any queues are created. By default, one thread is spawned for
- * every CPU core.
+ * every CPU core, but always at least ZQ_MIN_THREADS threads.
  */
 void
-zstream_queue_set_num_threads(uint_t num_threads);
+zstream_queue_set_num_threads(int num_threads);
 
 /*
  * Create a queue. The qp_context field is passed to the cost and processing
@@ -96,8 +105,6 @@ typedef struct {
 	zq_estimate_cost_f	*qp_cost;
 	void			*qp_context;
 	size_t			qp_item_size;
-	size_t			qp_batch_budget;
-	size_t			qp_queue_length;
 } zq_params_t;
 
 zstream_queue_t *

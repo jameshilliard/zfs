@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
@@ -325,8 +315,9 @@ zfs_range_tree_adjust_fill(zfs_range_tree_t *rt, zfs_range_seg_t *rs,
 		rt->rt_ops->rtop_add(rt, rs, rt->rt_arg);
 }
 
-static void
-zfs_range_tree_add_impl(void *arg, uint64_t start, uint64_t size, uint64_t fill)
+static boolean_t
+zfs_range_tree_add_impl(void *arg, uint64_t start, uint64_t size, uint64_t fill,
+    boolean_t panic_on_error)
 {
 	zfs_range_tree_t *rt = arg;
 	zfs_btree_index_t where;
@@ -356,17 +347,20 @@ zfs_range_tree_add_impl(void *arg, uint64_t start, uint64_t size, uint64_t fill)
 		uint64_t rstart = zfs_rs_get_start(rs, rt);
 		uint64_t rend = zfs_rs_get_end(rs, rt);
 		if (gap == 0) {
-			zfs_panic_recover("zfs: rt=%s: adding segment "
-			    "(offset=%llx size=%llx) overlapping with existing "
-			    "one (offset=%llx size=%llx)",
-			    ZFS_RT_NAME(rt),
-			    (longlong_t)start, (longlong_t)size,
-			    (longlong_t)rstart, (longlong_t)(rend - rstart));
-			return;
+			if (panic_on_error) {
+				zfs_panic_recover("zfs: rt=%s: adding segment "
+				    "(offset=%llx size=%llx) overlapping with "
+				    "existing one (offset=%llx size=%llx)",
+				    ZFS_RT_NAME(rt),
+				    (longlong_t)start, (longlong_t)size,
+				    (longlong_t)rstart,
+				    (longlong_t)(rend - rstart));
+			}
+			return (B_FALSE);
 		}
 		if (rstart <= start && rend >= end) {
 			zfs_range_tree_adjust_fill(rt, rs, fill);
-			return;
+			return (B_TRUE);
 		}
 
 		if (rt->rt_ops != NULL && rt->rt_ops->rtop_remove != NULL)
@@ -381,8 +375,8 @@ zfs_range_tree_add_impl(void *arg, uint64_t start, uint64_t size, uint64_t fill)
 		size = end - start;
 
 		zfs_btree_remove(&rt->rt_root, rs);
-		zfs_range_tree_add_impl(rt, start, size, fill);
-		return;
+		return (zfs_range_tree_add_impl(rt, start, size, fill,
+		    panic_on_error));
 	}
 
 	ASSERT0P(rs);
@@ -472,17 +466,42 @@ zfs_range_tree_add_impl(void *arg, uint64_t start, uint64_t size, uint64_t fill)
 
 	zfs_range_tree_stat_incr(rt, rs);
 	rt->rt_space += size + bridge_size;
+	return (B_TRUE);
 }
 
 void
 zfs_range_tree_add(void *arg, uint64_t start, uint64_t size)
 {
-	zfs_range_tree_add_impl(arg, start, size, size);
+	(void) zfs_range_tree_add_impl(arg, start, size, size, B_TRUE);
 }
 
-static void
+static boolean_t
+zfs_range_tree_valid_range(zfs_range_tree_t *rt, uint64_t start, uint64_t size)
+{
+	uint64_t end = start + size;
+
+	if (end <= start || start < rt->rt_start ||
+	    P2PHASE(start | size, 1ULL << rt->rt_shift) != 0)
+		return (B_FALSE);
+	return (rt->rt_type != ZFS_RANGE_SEG32 ||
+	    ((end - rt->rt_start) >> rt->rt_shift) <= UINT32_MAX);
+}
+
+boolean_t
+zfs_range_tree_try_add(zfs_range_tree_t *rt, uint64_t start, uint64_t size)
+{
+	/*
+	 * Gap trees support overlapping additions by adjusting their fill,
+	 * so only gap-free trees have a meaningful non-overlapping add.
+	 */
+	if (rt->rt_gap != 0 || !zfs_range_tree_valid_range(rt, start, size))
+		return (B_FALSE);
+	return (zfs_range_tree_add_impl(rt, start, size, size, B_FALSE));
+}
+
+static boolean_t
 zfs_range_tree_remove_impl(zfs_range_tree_t *rt, uint64_t start, uint64_t size,
-    boolean_t do_fill)
+    boolean_t do_fill, boolean_t panic_on_error)
 {
 	zfs_btree_index_t where;
 	zfs_range_seg_t *rs;
@@ -492,7 +511,11 @@ zfs_range_tree_remove_impl(zfs_range_tree_t *rt, uint64_t start, uint64_t size,
 	boolean_t left_over, right_over;
 
 	VERIFY3U(size, !=, 0);
-	VERIFY3U(size, <=, rt->rt_space);
+	if (size > rt->rt_space) {
+		if (panic_on_error)
+			VERIFY3U(size, <=, rt->rt_space);
+		return (B_FALSE);
+	}
 	if (rt->rt_type == ZFS_RANGE_SEG64)
 		ASSERT3U(start + size, >, start);
 
@@ -502,10 +525,13 @@ zfs_range_tree_remove_impl(zfs_range_tree_t *rt, uint64_t start, uint64_t size,
 
 	/* Make sure we completely overlap with someone */
 	if (rs == NULL) {
-		zfs_panic_recover("zfs: rt=%s: removing nonexistent segment "
-		    "from range tree (offset=%llx size=%llx)",
-		    ZFS_RT_NAME(rt), (longlong_t)start, (longlong_t)size);
-		return;
+		if (panic_on_error) {
+			zfs_panic_recover("zfs: rt=%s: removing nonexistent "
+			    "segment from range tree (offset=%llx size=%llx)",
+			    ZFS_RT_NAME(rt), (longlong_t)start,
+			    (longlong_t)size);
+		}
+		return (B_FALSE);
 	}
 
 	rstart = zfs_rs_get_start(rs, rt);
@@ -525,27 +551,33 @@ zfs_range_tree_remove_impl(zfs_range_tree_t *rt, uint64_t start, uint64_t size,
 				size = end - start;
 			} else {
 				zfs_range_tree_adjust_fill(rt, rs, -size);
-				return;
+				return (B_TRUE);
 			}
 		} else if (rstart != start || rend != end) {
-			zfs_panic_recover("zfs: rt=%s: freeing partial segment "
-			    "of gap tree (offset=%llx size=%llx) of "
-			    "(offset=%llx size=%llx)",
-			    ZFS_RT_NAME(rt),
-			    (longlong_t)start, (longlong_t)size,
-			    (longlong_t)rstart, (longlong_t)(rend - rstart));
-			return;
+			if (panic_on_error) {
+				zfs_panic_recover("zfs: rt=%s: freeing partial "
+				    "segment of gap tree (offset=%llx "
+				    "size=%llx) of (offset=%llx size=%llx)",
+				    ZFS_RT_NAME(rt),
+				    (longlong_t)start, (longlong_t)size,
+				    (longlong_t)rstart,
+				    (longlong_t)(rend - rstart));
+			}
+			return (B_FALSE);
 		}
 	}
 
 	if (!(rstart <= start && rend >= end)) {
-		zfs_panic_recover("zfs: rt=%s: removing segment "
-		    "(offset=%llx size=%llx) not completely overlapped by "
-		    "existing one (offset=%llx size=%llx)",
-		    ZFS_RT_NAME(rt),
-		    (longlong_t)start, (longlong_t)size,
-		    (longlong_t)rstart, (longlong_t)(rend - rstart));
-		return;
+		if (panic_on_error) {
+			zfs_panic_recover("zfs: rt=%s: removing segment "
+			    "(offset=%llx size=%llx) not completely "
+			    "overlapped by existing one (offset=%llx "
+			    "size=%llx)", ZFS_RT_NAME(rt),
+			    (longlong_t)start, (longlong_t)size,
+			    (longlong_t)rstart,
+			    (longlong_t)(rend - rstart));
+		}
+		return (B_FALSE);
 	}
 
 	left_over = (rstart != start);
@@ -602,18 +634,31 @@ zfs_range_tree_remove_impl(zfs_range_tree_t *rt, uint64_t start, uint64_t size,
 	}
 
 	rt->rt_space -= size;
+	return (B_TRUE);
 }
 
 void
 zfs_range_tree_remove(void *arg, uint64_t start, uint64_t size)
 {
-	zfs_range_tree_remove_impl(arg, start, size, B_FALSE);
+	(void) zfs_range_tree_remove_impl(arg, start, size, B_FALSE, B_TRUE);
+}
+
+boolean_t
+zfs_range_tree_try_remove(zfs_range_tree_t *rt, uint64_t start, uint64_t size)
+{
+	/*
+	 * Return without modifying the tree unless one segment completely
+	 * contains the requested range.
+	 */
+	if (rt->rt_gap != 0 || !zfs_range_tree_valid_range(rt, start, size))
+		return (B_FALSE);
+	return (zfs_range_tree_remove_impl(rt, start, size, B_FALSE, B_FALSE));
 }
 
 void
 zfs_range_tree_remove_fill(zfs_range_tree_t *rt, uint64_t start, uint64_t size)
 {
-	zfs_range_tree_remove_impl(rt, start, size, B_TRUE);
+	(void) zfs_range_tree_remove_impl(rt, start, size, B_TRUE, B_TRUE);
 }
 
 void

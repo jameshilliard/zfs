@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -152,11 +142,15 @@ struct spa_aux_vdev {
 	uint_t		sav_npending;		/* # pending devices */
 };
 
+/*
+ * scl_count holds the reference count plus SCL_COUNT_WRITER, so that a reader
+ * can take a reference and check for a writer in one atomic operation.
+ */
 typedef struct spa_config_lock {
 	kmutex_t	scl_lock;
 	kthread_t	*scl_writer;
 	int		scl_write_wanted;
-	int		scl_count;
+	uint32_t	scl_count;
 	kcondvar_t	scl_cv;
 } ____cacheline_aligned spa_config_lock_t;
 
@@ -264,6 +258,7 @@ struct spa {
 	boolean_t	spa_is_initializing;	/* true while opening pool */
 	boolean_t	spa_is_exporting;	/* true while exporting pool */
 	kthread_t	*spa_export_thread;	/* valid during pool export */
+	uint_t		spa_stats_holds;	/* export waits for these */
 	kthread_t	*spa_load_thread;	/* loading, no namespace lock */
 	metaslab_class_t *spa_normal_class;	/* normal data class */
 	metaslab_class_t *spa_log_class;	/* intent log data class */
@@ -351,7 +346,7 @@ struct spa {
 	kthread_t	*spa_async_thread;	/* thread doing async task */
 	int		spa_async_suspended;	/* async tasks suspended */
 	kcondvar_t	spa_async_cv;		/* wait for thread_exit() */
-	uint16_t	spa_async_tasks;	/* async task mask */
+	uint32_t	spa_async_tasks;	/* async task mask */
 	uint64_t	spa_missing_tvds;	/* unopenable tvds on load */
 	uint64_t	spa_missing_tvds_allowed; /* allow loading spa? */
 
@@ -393,6 +388,7 @@ struct spa {
 	char		*spa_root;		/* alternate root directory */
 	uint64_t	spa_ena;		/* spa-wide ereport ENA */
 	int		spa_last_open_failed;	/* error if last open failed */
+	uint64_t	spa_load_latest_ub_txg;	/* newest ub txg on disk */
 	uint64_t	spa_last_ubsync_txg;	/* "best" uberblock txg */
 	uint64_t	spa_last_ubsync_txg_ts;	/* timestamp from that ub */
 	uint64_t	spa_load_txg;		/* ub txg that loaded */
@@ -441,6 +437,7 @@ struct spa {
 	boolean_t	spa_active_ddt_prune;	/* ddt prune process active */
 	brt_vdev_t	**spa_brt_vdevs;	/* array of per-vdev BRTs */
 	uint64_t	spa_brt_nvdevs;		/* number of vdevs in BRT */
+	brt_dedup_shard_t *spa_brt_dedup;	/* pending dedup'd clones */
 	uint64_t	spa_brt_rangesize;	/* pool's BRT range size */
 	krwlock_t	spa_brt_lock;		/* Protects brt_vdevs/nvdevs */
 	kmutex_t	spa_vdev_top_lock;	/* dueling offline/remove */
